@@ -45,3 +45,6 @@ Thumbs.db
 # Local development
 *.log
 *.local
+
+# Packaging
+.pypirc
