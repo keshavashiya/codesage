@@ -30,7 +30,7 @@ ollama pull mxbai-embed-large     # For embeddings (~670MB)
 ### From PyPI
 
 ```bash
-pip install codesage
+pip install pycodesage
 ```
 
 ### From Source (Development)
@@ -51,8 +51,8 @@ pip install -e ".[dev]"
 ### Optional: OpenAI/Anthropic Support
 
 ```bash
-pip install codesage[openai]      # For OpenAI
-pip install codesage[anthropic]   # For Anthropic Claude
+pip install pycodesage[openai]      # For OpenAI
+pip install pycodesage[anthropic]   # For Anthropic Claude
 ```
 
 ## Quick Start
