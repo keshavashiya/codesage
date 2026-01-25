@@ -3,6 +3,7 @@
 # Suppress urllib3 SSL warning on macOS with LibreSSL
 import warnings
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
+warnings.filterwarnings("ignore", message="Failed to initialize NumPy")
 
 import signal
 import sys
