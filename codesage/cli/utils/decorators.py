@@ -6,7 +6,7 @@ from typing import Any, Callable, TypeVar
 
 import typer
 
-from codesage.cli.utils.console import get_console, print_error
+from codesage.cli.utils.console import get_stderr_console, print_error
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -16,6 +16,9 @@ def handle_errors(func: F) -> F:
 
     Catches exceptions and keyboard interrupts, printing user-friendly
     error messages and exiting with appropriate codes.
+
+    All error output goes to stderr to avoid corrupting stdout-based
+    protocols like MCP JSON-RPC.
 
     Args:
         func: Command function to wrap.
@@ -29,7 +32,8 @@ def handle_errors(func: F) -> F:
         try:
             return func(*args, **kwargs)
         except KeyboardInterrupt:
-            get_console().print("\n[yellow]⚠[/yellow] Operation cancelled by user.")
+            # Use stderr to avoid corrupting stdout in stdio mode
+            get_stderr_console().print("\n[yellow]⚠[/yellow] Operation cancelled by user.")
             raise typer.Exit(130)
         except typer.Exit:
             raise
@@ -46,6 +50,9 @@ def require_project(func: F) -> F:
     Loads the project configuration and passes it to the command.
     If project is not initialized, prints an error and exits.
 
+    All error output goes to stderr to avoid corrupting stdout-based
+    protocols like MCP JSON-RPC.
+
     Args:
         func: Command function to wrap.
 
@@ -61,8 +68,10 @@ def require_project(func: F) -> F:
             config = Config.load(project_path)
         except FileNotFoundError:
             print_error("Project not initialized.")
-            get_console().print("  Run: [cyan]codesage init[/cyan]")
+            # Use stderr to avoid corrupting stdout in stdio mode
+            get_stderr_console().print("  Run: [cyan]codesage init[/cyan]")
             raise typer.Exit(1)
         return func(*args, path=path, config=config, **kwargs)
 
     return wrapper  # type: ignore
+

@@ -14,7 +14,13 @@ import typer
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from codesage.cli.utils.console import get_console, print_error, print_success
+from codesage.cli.utils.console import (
+    get_console,
+    get_stderr_console,
+    print_error,
+    print_success,
+    set_mcp_stdio_mode,
+)
 from codesage.cli.utils.decorators import handle_errors
 
 app = typer.Typer(help="MCP server for Claude Desktop integration")
@@ -68,11 +74,17 @@ def serve(
       - HTTP mode: codesage mcp serve --global -t sse -p 8080
     """
     console = get_console()
+    stderr_console = get_stderr_console()
 
     # Validate transport
     if transport not in ["stdio", "sse"]:
         print_error(f"Invalid transport: {transport}. Must be 'stdio' or 'sse'.")
         raise typer.Exit(1)
+
+    # Enable stdio mode to redirect all console output to stderr
+    # This prevents corrupting the MCP JSON-RPC protocol on stdout
+    if transport == "stdio":
+        set_mcp_stdio_mode(True)
 
     if global_mode:
         # Global mode: serve all projects
@@ -116,7 +128,8 @@ def serve(
             config = Config.load(project_path)
         except FileNotFoundError:
             print_error(f"Project not initialized at {project_path}")
-            console.print("Run 'codesage init' first")
+            # Use stderr console to avoid corrupting stdout in stdio mode
+            stderr_console.print("Run 'codesage init' first")
             raise typer.Exit(1)
 
         # Only show panel for SSE transport (stdio must have clean stdout for JSON-RPC)
@@ -133,13 +146,20 @@ def serve(
                 )
             )
 
-    # Run the server
-    try:
-        asyncio.run(run_mcp_server(project_path, transport=transport, host=host, port=port))
-    except KeyboardInterrupt:
-        if transport == "sse":
-            console.print("\n[dim]Server stopped[/dim]")
-        pass
+        try:
+            server = CodeSageMCPServer(project_path)
+
+            if transport == "stdio":
+                asyncio.run(server.run_stdio())
+            else:  # sse
+                asyncio.run(server.run_sse(host=host, port=port))
+
+        except KeyboardInterrupt:
+            if transport == "sse":
+                console.print("\n[yellow]Server stopped by user[/yellow]")
+        except Exception as e:
+            print_error(f"Server error: {e}")
+            raise typer.Exit(1)
 
 
 @app.command("install")
