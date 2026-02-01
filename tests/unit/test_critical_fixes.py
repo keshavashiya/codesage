@@ -272,7 +272,7 @@ class TestGracefulShutdown:
 
     def test_register_cleanup_handler(self):
         """Test registering cleanup handlers."""
-        from codesage.cli.main import register_cleanup, unregister_cleanup, _cleanup_handlers
+        from codesage.cli.utils.signals import register_cleanup, unregister_cleanup, _cleanup_handlers
 
         cleanup_called = []
 
@@ -299,7 +299,7 @@ class TestGracefulShutdown:
 
     def test_unregister_nonexistent_handler(self):
         """Test that unregistering non-existent handler doesn't fail."""
-        from codesage.cli.main import unregister_cleanup
+        from codesage.cli.utils.signals import unregister_cleanup
 
         def nonexistent():
             pass

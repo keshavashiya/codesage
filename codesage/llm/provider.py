@@ -1,8 +1,10 @@
 """LangChain LLM provider for code intelligence."""
 
-from typing import Optional, List, Dict, Any
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from langchain_ollama import ChatOllama
+
+F = TypeVar("F", bound=Callable[..., Any])
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
@@ -78,7 +80,7 @@ class LLMProvider:
             except ImportError:
                 raise ImportError(
                     "OpenAI support requires langchain-openai. "
-                    "Install with: pip install codesage[openai]"
+                    "Install with: pipx inject pycodesage 'pycodesage[openai]' (or pip install 'pycodesage[openai]')"
                 )
         elif self.config.provider == "anthropic":
             try:
@@ -94,7 +96,7 @@ class LLMProvider:
             except ImportError:
                 raise ImportError(
                     "Anthropic support requires langchain-anthropic. "
-                    "Install with: pip install codesage[anthropic]"
+                    "Install with: pipx inject pycodesage 'pycodesage[anthropic]' (or pip install 'pycodesage[anthropic]')"
                 )
         else:
             raise ValueError(f"Unknown provider: {self.config.provider}")
@@ -106,7 +108,7 @@ class LLMProvider:
             raise RuntimeError("LLM not initialized")
         return self._llm
 
-    def _create_retry_decorator(self):
+    def _create_retry_decorator(self) -> Callable[[F], F]:
         """Create a retry decorator based on config settings."""
         return retry_with_backoff(
             max_retries=self.config.max_retries,

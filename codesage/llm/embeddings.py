@@ -85,7 +85,7 @@ class EmbeddingService:
             except ImportError:
                 raise ImportError(
                     "OpenAI embeddings require langchain-openai. "
-                    "Install with: pip install codesage[openai]"
+                    "Install with: pipx inject pycodesage 'pycodesage[openai]' (or pip install 'pycodesage[openai]')"
                 )
         else:
             # Default to Ollama for other providers

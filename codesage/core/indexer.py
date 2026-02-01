@@ -1,8 +1,20 @@
 """Repository indexer for code intelligence."""
 
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional, TypedDict
 import hashlib
+
+
+class IndexStats(TypedDict):
+    """Statistics from indexing operation."""
+
+    files_scanned: int
+    files_indexed: int
+    files_skipped: int
+    elements_found: int
+    nodes_added: int  # Graph nodes
+    relationships_added: int  # Graph relationships
+    errors: int
 
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
@@ -10,9 +22,10 @@ from codesage.utils.config import Config
 from codesage.utils.logging import get_logger
 from codesage.parsers import ParserRegistry
 from codesage.llm.embeddings import EmbeddingService
-from codesage.storage.database import Database
-from codesage.storage.vector_store import VectorStore
+from codesage.storage.manager import StorageManager
 from codesage.models.code_element import CodeElement
+from codesage.memory.hooks import MemoryHooks
+from codesage.core.relationship_extractor import extract_relationships_from_file
 
 logger = get_logger("indexer")
 
@@ -21,7 +34,7 @@ class Indexer:
     """Indexes repository files and extracts code elements.
 
     Walks the repository, parses code files, generates embeddings,
-    and stores everything in the database and vector store.
+    and stores everything in SQLite, LanceDB, and KuzuDB.
     """
 
     def __init__(self, config: Config):
@@ -31,22 +44,36 @@ class Indexer:
             config: CodeSage configuration
         """
         self.config = config
-        self.db = Database(config.storage.db_path)
 
         # Initialize embedding service
         self.embedder = EmbeddingService(config.llm, config.cache_dir)
 
-        # Initialize vector store with embedder
-        self.vector_store = VectorStore(
-            config.storage.chroma_path,
-            self.embedder.embedder,
+        # Initialize unified storage manager
+        self.storage = StorageManager(
+            config=config,
+            embedding_fn=self.embedder.embedder,
         )
 
-        self.stats = {
+        # Legacy compatibility
+        self.db = self.storage.db
+        self.vector_store = self.storage.vector_store
+
+        # Initialize memory hooks for pattern learning
+        self._memory_hooks: Optional[MemoryHooks] = None
+        if config.memory.enabled and config.memory.learn_on_index:
+            self._memory_hooks = MemoryHooks(
+                embedding_fn=self.embedder.embedder,
+                enabled=True,
+            )
+            logger.debug("Memory learning enabled for indexer")
+
+        self.stats: IndexStats = {
             "files_scanned": 0,
             "files_indexed": 0,
             "files_skipped": 0,
             "elements_found": 0,
+            "nodes_added": 0,
+            "relationships_added": 0,
             "errors": 0,
         }
 
@@ -137,19 +164,46 @@ class Indexer:
             if not elements:
                 return 0
 
-            # Clear old elements for this file
-            self.db.delete_elements_for_file(file_path)
-            self.vector_store.delete_by_file(file_path)
+            # Clear old data for this file (all backends)
+            self.storage.delete_by_file(file_path)
 
-            # Store new elements
-            self.db.store_elements(elements)
-            self.vector_store.add_elements(elements)
+            # Store elements in all backends (SQLite, LanceDB, KuzuDB)
+            self.storage.add_elements(elements)
+
+            # Extract and store relationships (calls, imports, inheritance)
+            if self.config.storage.use_graph:
+                try:
+                    nodes, relationships = extract_relationships_from_file(
+                        file_path, elements
+                    )
+                    # Add file/module nodes
+                    if nodes and self.storage.graph_store:
+                        self.storage.graph_store.add_nodes(nodes)
+                        self.stats["nodes_added"] += len(nodes)
+
+                    # Add relationships
+                    if relationships:
+                        self.storage.add_relationships(relationships)
+                        self.stats["relationships_added"] += len(relationships)
+
+                except Exception as e:
+                    logger.warning(f"Error extracting relationships from {file_path}: {e}")
 
             # Update file hash
             self.db.set_file_hash(file_path, self._compute_file_hash(file_path))
 
+            # Learn patterns from indexed elements
+            if self._memory_hooks:
+                element_dicts = [el.to_dict() for el in elements]
+                self._memory_hooks.on_elements_indexed(
+                    element_dicts,
+                    self.config.project_name,
+                    file_path,
+                )
+
             self.stats["files_indexed"] += 1
             self.stats["elements_found"] += len(elements)
+            self.stats["nodes_added"] += len(elements)
 
             return len(elements)
 
@@ -162,7 +216,7 @@ class Indexer:
         self,
         incremental: bool = True,
         show_progress: bool = True,
-    ) -> dict:
+    ) -> IndexStats:
         """Index the entire repository.
 
         Args:
@@ -173,11 +227,13 @@ class Indexer:
             Dictionary with indexing statistics
         """
         # Reset stats
-        self.stats = {
+        self.stats: IndexStats = {
             "files_scanned": 0,
             "files_indexed": 0,
             "files_skipped": 0,
             "elements_found": 0,
+            "nodes_added": 0,
+            "relationships_added": 0,
             "errors": 0,
         }
 
@@ -213,17 +269,56 @@ class Indexer:
             self.stats["elements_found"],
         )
 
+        # Notify memory system that project indexing is complete
+        if self._memory_hooks:
+            self._memory_hooks.on_project_indexed(
+                project_name=self.config.project_name,
+                project_path=self.config.project_path,
+                total_files=self.stats["files_indexed"],
+                total_elements=self.stats["elements_found"],
+            )
+            logger.info(
+                f"Memory learning complete: {self._memory_hooks.get_stats()}"
+            )
+
         return self.stats
 
     def clear_index(self) -> None:
-        """Clear all indexed data."""
-        self.db.clear()
-        self.vector_store.clear()
+        """Clear all indexed data from all backends."""
+        self.storage.clear()
 
-        self.stats = {
+        self.stats: IndexStats = {
             "files_scanned": 0,
             "files_indexed": 0,
             "files_skipped": 0,
             "elements_found": 0,
+            "nodes_added": 0,
+            "relationships_added": 0,
             "errors": 0,
         }
+
+    def set_memory_learning(self, enabled: bool) -> None:
+        """Enable or disable memory learning.
+
+        Args:
+            enabled: Whether to enable learning
+        """
+        if self._memory_hooks:
+            self._memory_hooks.enabled = enabled
+        elif enabled and self.config.memory.enabled:
+            # Create hooks if they don't exist and learning is requested
+            self._memory_hooks = MemoryHooks(
+                embedding_fn=self.embedder.embedder,
+                enabled=True,
+            )
+
+    def get_memory_stats(self) -> Optional[Dict[str, Any]]:
+        """Get memory learning statistics.
+
+        Returns:
+            Dictionary with memory stats, or None if not enabled
+        """
+        if self._memory_hooks:
+            return self._memory_hooks.get_stats()
+        return None
+

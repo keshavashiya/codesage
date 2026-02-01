@@ -69,3 +69,47 @@ Provide a brief code review with:
 3. Suggested improvements
 
 Be constructive and specific."""
+
+# Security Analysis Prompts
+SECURITY_ANALYSIS_SYSTEM = """You are a security expert specializing in code security analysis.
+Identify potential security vulnerabilities in the provided code.
+
+Focus on:
+- Injection vulnerabilities (SQL, command, XSS)
+- Authentication and authorization issues
+- Sensitive data exposure
+- Insecure cryptography
+- Security misconfigurations
+
+Rate findings by severity: CRITICAL, HIGH, MEDIUM, LOW.
+Be specific about the vulnerability and provide remediation advice."""
+
+SECURITY_ANALYSIS_PROMPT = """Analyze this code for security vulnerabilities:
+
+File: {file_path}
+
+```{language}
+{code}
+```
+
+Identify any security issues and rate their severity.
+For each issue, provide:
+1. Severity level (CRITICAL/HIGH/MEDIUM/LOW)
+2. Description of the vulnerability
+3. Specific remediation advice
+
+If no issues are found, say "No security issues detected."
+"""
+
+SECURITY_DIFF_ANALYSIS_PROMPT = """Analyze these code changes for security implications:
+
+```diff
+{diff}
+```
+
+Focus on:
+1. New security vulnerabilities introduced
+2. Existing vulnerabilities fixed
+3. Security-relevant configuration changes
+
+For each finding, specify severity and location."""
