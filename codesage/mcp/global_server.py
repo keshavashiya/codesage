@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mcp.server import Server
-from mcp.types import Resource, Tool
+from mcp.types import Resource, TextContent, Tool
 
 from codesage.utils.config import Config
 from codesage.utils.logging import get_logger
@@ -196,18 +196,31 @@ class GlobalCodeSageMCPServer:
             ]
 
         @self.server.call_tool()
-        async def call_tool(name: str, arguments: Any) -> List[Any]:
+        async def call_tool(name: str, arguments: Any) -> List[TextContent]:
             """Handle tool calls."""
-            if name == "list_projects":
-                return await self._tool_list_projects(arguments or {})
-            elif name == "search_code":
-                return await self._tool_search_code(arguments or {})
-            elif name == "get_file_context":
-                return await self._tool_get_file_context(arguments or {})
-            elif name == "get_stats":
-                return await self._tool_get_stats(arguments or {})
-            else:
-                raise ValueError(f"Unknown tool: {name}")
+            try:
+                if name == "list_projects":
+                    result = await self._tool_list_projects(arguments or {})
+                elif name == "search_code":
+                    result = await self._tool_search_code(arguments or {})
+                elif name == "get_file_context":
+                    result = await self._tool_get_file_context(arguments or {})
+                elif name == "get_stats":
+                    result = await self._tool_get_stats(arguments or {})
+                else:
+                    result = {"error": f"Unknown tool: {name}"}
+
+                return [TextContent(
+                    type="text",
+                    text=json.dumps(result, indent=2, default=str),
+                )]
+
+            except Exception as e:
+                logger.error(f"Tool {name} failed: {e}")
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": str(e)}),
+                )]
 
     def _register_resources(self) -> None:
         """Register MCP resources."""
@@ -238,9 +251,11 @@ class GlobalCodeSageMCPServer:
             return resources
 
         @self.server.read_resource()
-        async def read_resource(uri: str) -> str:
+        async def read_resource(uri) -> str:
             """Read a resource."""
-            if uri == "codesage://projects":
+            # Convert AnyUrl to string for comparison
+            uri_str = str(uri)
+            if uri_str == "codesage://projects":
                 projects_info = []
                 for name, path in self._projects.items():
                     try:
@@ -258,8 +273,8 @@ class GlobalCodeSageMCPServer:
 
                 return json.dumps(projects_info, indent=2)
 
-            elif uri.startswith("codesage://project/"):
-                project_name = uri.replace("codesage://project/", "")
+            elif uri_str.startswith("codesage://project/"):
+                project_name = uri_str.replace("codesage://project/", "")
                 project_path = self._projects.get(project_name)
 
                 if not project_path:
@@ -282,7 +297,7 @@ class GlobalCodeSageMCPServer:
 
             return json.dumps({"error": "Unknown resource"})
 
-    async def _tool_list_projects(self, args: Dict[str, Any]) -> List[Any]:
+    async def _tool_list_projects(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List all projects tool."""
         projects = []
         for name, path in self._projects.items():
@@ -299,9 +314,9 @@ class GlobalCodeSageMCPServer:
                     "path": str(path),
                 })
 
-        return [{"projects": projects, "count": len(projects)}]
+        return {"projects": projects, "count": len(projects)}
 
-    async def _tool_search_code(self, args: Dict[str, Any]) -> List[Any]:
+    async def _tool_search_code(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Search code across projects."""
         query = args.get("query", "")
         project_name = args.get("project_name")
@@ -309,7 +324,7 @@ class GlobalCodeSageMCPServer:
         min_similarity = args.get("min_similarity", 0.2)
 
         if not query:
-            return [{"error": "Query is required"}]
+            return {"error": "Query is required"}
 
         results = []
 
@@ -349,9 +364,9 @@ class GlobalCodeSageMCPServer:
         if limit and len(results) > limit * 3:
             results = results[:limit * 3]
 
-        return [{"query": query, "count": len(results), "results": results}]
+        return {"query": query, "count": len(results), "results": results}
 
-    async def _tool_get_file_context(self, args: Dict[str, Any]) -> List[Any]:
+    async def _tool_get_file_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Get file context from a project."""
         project_name = args.get("project_name")
         file_path = args.get("file_path")
@@ -359,15 +374,15 @@ class GlobalCodeSageMCPServer:
         line_end = args.get("line_end")
 
         if not project_name or not file_path:
-            return [{"error": "project_name and file_path are required"}]
+            return {"error": "project_name and file_path are required"}
 
         project_path = self._projects.get(project_name)
         if not project_path:
-            return [{"error": f"Project not found: {project_name}"}]
+            return {"error": f"Project not found: {project_name}"}
 
         full_path = project_path / file_path
         if not full_path.exists():
-            return [{"error": f"File not found: {file_path}"}]
+            return {"error": f"File not found: {file_path}"}
 
         try:
             with open(full_path, "r") as f:
@@ -379,17 +394,17 @@ class GlobalCodeSageMCPServer:
             else:
                 content = "".join(lines)
 
-            return [{
+            return {
                 "project": project_name,
                 "file": file_path,
                 "line_start": line_start or 1,
                 "line_count": len(lines),
                 "content": content,
-            }]
+            }
         except Exception as e:
-            return [{"error": str(e)}]
+            return {"error": str(e)}
 
-    async def _tool_get_stats(self, args: Dict[str, Any]) -> List[Any]:
+    async def _tool_get_stats(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Get project or global stats."""
         project_name = args.get("project_name")
         detailed = args.get("detailed", False)
@@ -398,7 +413,7 @@ class GlobalCodeSageMCPServer:
             # Get stats for specific project
             project_path = self._projects.get(project_name)
             if not project_path:
-                return [{"error": f"Project not found: {project_name}"}]
+                return {"error": f"Project not found: {project_name}"}
 
             try:
                 config = Config.load(project_path)
@@ -406,13 +421,13 @@ class GlobalCodeSageMCPServer:
                 db = Database(config.storage.db_path)
                 stats = db.get_stats()
 
-                return [{
+                return {
                     "project": project_name,
                     "path": str(project_path),
                     **stats,
-                }]
+                }
             except Exception as e:
-                return [{"error": str(e)}]
+                return {"error": str(e)}
         else:
             # Get global stats
             global_stats = {
@@ -433,7 +448,7 @@ class GlobalCodeSageMCPServer:
 
                 global_stats["per_project"] = per_project
 
-            return [global_stats]
+            return global_stats
 
     async def run_stdio(self) -> None:
         """Run the MCP server on stdio."""

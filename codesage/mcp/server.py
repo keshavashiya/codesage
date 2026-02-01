@@ -388,9 +388,11 @@ class CodeSageMCPServer:
             ]
 
         @self.server.read_resource()
-        async def read_resource(uri: str) -> str:
+        async def read_resource(uri) -> str:
             """Read a resource by URI."""
-            if uri == "codesage://codebase":
+            # Convert AnyUrl to string for comparison
+            uri_str = str(uri)
+            if uri_str == "codesage://codebase":
                 stats = self.db.get_stats()
                 return json.dumps({
                     "project": self.config.project_name,
@@ -401,19 +403,19 @@ class CodeSageMCPServer:
                     "last_indexed": stats.get("last_indexed"),
                 }, indent=2)
 
-            if uri.startswith("codesage://file/"):
-                file_path = uri.replace("codesage://file/", "")
+            if uri_str.startswith("codesage://file/"):
+                file_path = uri_str.replace("codesage://file/", "")
                 full_path = self.project_path / file_path
                 if full_path.exists():
                     return full_path.read_text()
                 return f"File not found: {file_path}"
 
-            if uri.startswith("codesage://search/"):
-                query = uri.replace("codesage://search/", "")
+            if uri_str.startswith("codesage://search/"):
+                query = uri_str.replace("codesage://search/", "")
                 results = await self._tool_search_code({"query": query, "limit": 5})
                 return json.dumps(results, indent=2)
 
-            return f"Unknown resource: {uri}"
+            return f"Unknown resource: {uri_str}"
 
     async def run_stdio(self) -> None:
         """Run the MCP server on stdio (single client, process-based)."""
