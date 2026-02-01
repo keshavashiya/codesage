@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mcp.server import Server
-from mcp.types import CallToolResult, Resource, TextContent, Tool
+from mcp.types import CallToolResult, Resource, ResourceTemplate, TextContent, Tool
 
 from codesage.utils.config import Config
 from codesage.utils.logging import get_logger
@@ -57,6 +57,17 @@ class GlobalCodeSageMCPServer:
         # Lazy-loaded global services
         self._memory_manager = None
 
+        self._initialize_server()
+
+    @property
+    def memory(self):
+        """Lazy-load memory manager."""
+        if self._memory_manager is None:
+            from codesage.memory.memory_manager import MemoryManager
+            self._memory_manager = MemoryManager(global_dir=self.global_dir / "developer")
+        return self._memory_manager
+
+    def _initialize_server(self):
         # Create MCP server
         self.server = Server("codesage-global")
 
@@ -193,6 +204,14 @@ class GlobalCodeSageMCPServer:
                         },
                     },
                 ),
+                Tool(
+                    name="get_developer_profile",
+                    description="Get developer profile: preferences, coding style, and learned patterns.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                ),
             ]
 
         @self.server.call_tool()
@@ -207,6 +226,8 @@ class GlobalCodeSageMCPServer:
                     result = await self._tool_get_file_context(arguments or {})
                 elif name == "get_stats":
                     result = await self._tool_get_stats(arguments or {})
+                elif name == "get_developer_profile":
+                    result = await self._tool_get_developer_profile(arguments or {})
                 else:
                     result = {"error": f"Unknown tool: {name}"}
 
@@ -236,6 +257,9 @@ class GlobalCodeSageMCPServer:
         @self.server.list_resources()
         async def list_resources() -> List[Resource]:
             """List available resources."""
+            # Refresh projects discovery
+            self._discover_projects()
+
             resources = [
                 Resource(
                     uri="codesage://projects",
@@ -256,13 +280,47 @@ class GlobalCodeSageMCPServer:
                     )
                 )
 
+            # Add developer profile resource
+            resources.append(
+                Resource(
+                    uri="codesage://developer/profile",
+                    name="Developer Profile",
+                    description="User preferences, coding style, and learned patterns",
+                    mimeType="application/json",
+                )
+            )
+
             return resources
+
+        @self.server.list_resource_templates()
+        async def list_resource_templates() -> List[ResourceTemplate]:
+            """List resource templates."""
+            from mcp.types import ResourceTemplate
+
+            return [
+                ResourceTemplate(
+                    uriTemplate="codesage://project/{project_name}/file/{path}",
+                    name="Source File (Global)",
+                    description="Get content of a file from any project",
+                    mimeType="text/plain",
+                ),
+                ResourceTemplate(
+                    uriTemplate="codesage://project/{project_name}/search/{query}",
+                    name="Code Search (Global)",
+                    description="Search for code in a specific project",
+                    mimeType="application/json",
+                ),
+            ]
 
         @self.server.read_resource()
         async def read_resource(uri) -> str:
             """Read a resource."""
+            # Refresh projects discovery
+            self._discover_projects()
+
             # Convert AnyUrl to string for comparison
             uri_str = str(uri)
+
             if uri_str == "codesage://projects":
                 projects_info = []
                 for name, path in self._projects.items():
@@ -281,27 +339,65 @@ class GlobalCodeSageMCPServer:
 
                 return json.dumps(projects_info, indent=2)
 
+            elif uri_str == "codesage://developer/profile":
+                profile = await self._tool_get_developer_profile({})
+                return json.dumps(profile, indent=2)
+
             elif uri_str.startswith("codesage://project/"):
-                project_name = uri_str.replace("codesage://project/", "")
-                project_path = self._projects.get(project_name)
+                # Handle templates first (longer paths)
+                if "/file/" in uri_str:
+                    # codesage://project/{project_name}/file/{path}
+                    parts = uri_str.replace("codesage://project/", "").split("/file/", 1)
+                    if len(parts) != 2:
+                        return "Invalid file URI format"
 
-                if not project_path:
-                    return json.dumps({"error": f"Project not found: {project_name}"})
+                    project_name, file_path = parts
+                    project_path = self._projects.get(project_name)
 
-                try:
-                    config = Config.load(project_path)
-                    from codesage.storage.database import Database
-                    db = Database(config.storage.db_path)
-                    stats = db.get_stats()
+                    if not project_path:
+                        return f"Project not found: {project_name}"
 
-                    return json.dumps({
-                        "name": config.project_name,
-                        "path": str(project_path),
-                        "language": config.language,
-                        "stats": stats,
-                    }, indent=2)
-                except Exception as e:
-                    return json.dumps({"error": str(e)})
+                    full_path = project_path / file_path
+                    if full_path.exists():
+                        return full_path.read_text()
+                    return f"File not found: {file_path} in {project_name}"
+
+                elif "/search/" in uri_str:
+                    # codesage://project/{project_name}/search/{query}
+                    parts = uri_str.replace("codesage://project/", "").split("/search/", 1)
+                    if len(parts) != 2:
+                        return json.dumps({"error": "Invalid search URI format"})
+
+                    project_name, query = parts
+                    results = await self._tool_search_code({
+                        "query": query,
+                        "project_name": project_name,
+                        "limit": 5
+                    })
+                    return json.dumps(results, indent=2)
+
+                else:
+                    # codesage://project/{name} (Project overview)
+                    project_name = uri_str.replace("codesage://project/", "")
+                    project_path = self._projects.get(project_name)
+
+                    if not project_path:
+                        return json.dumps({"error": f"Project not found: {project_name}"})
+
+                    try:
+                        config = Config.load(project_path)
+                        from codesage.storage.database import Database
+                        db = Database(config.storage.db_path)
+                        stats = db.get_stats()
+
+                        return json.dumps({
+                            "name": config.project_name,
+                            "path": str(project_path),
+                            "language": config.language,
+                            "stats": stats,
+                        }, indent=2)
+                    except Exception as e:
+                        return json.dumps({"error": str(e)})
 
             return json.dumps({"error": "Unknown resource"})
 
@@ -457,6 +553,35 @@ class GlobalCodeSageMCPServer:
                 global_stats["per_project"] = per_project
 
             return global_stats
+
+    async def _tool_get_developer_profile(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get developer profile (preferences and patterns)."""
+        try:
+            # 1. Get all preferences
+            preferences = self.memory.get_all_preferences(category=None) # All categories
+
+            # 2. Get top cross-project patterns
+            # These are patterns that appear in multiple projects, indicating a core style
+            patterns = self.memory.get_cross_project_patterns(min_projects=2)
+
+            # Format patterns
+            formatted_patterns = [
+                {
+                    "name": p.get("name"),
+                    "description": p.get("description"),
+                    "occurrences": p.get("occurrences", 0),
+                    "projects": p.get("projects", []),
+                }
+                for p in patterns
+            ]
+
+            return {
+                "preferences": preferences,
+                "learned_patterns": formatted_patterns,
+                "interaction_stats": self.memory.get_interaction_stats(),
+            }
+        except Exception as e:
+            return {"error": f"Failed to load profile: {e}"}
 
     async def run_stdio(self) -> None:
         """Run the MCP server on stdio."""

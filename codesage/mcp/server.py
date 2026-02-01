@@ -75,7 +75,9 @@ class CodeSageMCPServer:
         self._suggester = None
         self._scanner = None
         self._analyzer = None
+        self._analyzer = None
         self._db = None
+        self._memory = None
 
         # Create MCP server
         self.server = Server("codesage")
@@ -101,6 +103,18 @@ class CodeSageMCPServer:
             from codesage.storage.database import Database
             self._db = Database(self.config.storage.db_path)
         return self._db
+
+    @property
+    def memory(self):
+        """Lazy-load memory manager."""
+        if self._memory is None:
+            from codesage.memory.memory_manager import MemoryManager
+            from codesage.llm.embeddings import EmbeddingService
+
+            # Use embedding service for pattern search
+            embedder = EmbeddingService(self.config.llm, self.config.cache_dir)
+            self._memory = MemoryManager(embedding_fn=embedder.embedder)
+        return self._memory
 
     def _register_tools(self) -> None:
         """Register all MCP tools."""
@@ -135,7 +149,7 @@ class CodeSageMCPServer:
                 ),
                 Tool(
                     name="get_file_context",
-                    description="Get the content of a specific file or code element with surrounding context.",
+                    description="Get rich context for a file: content, definitions, security issues, and related code.",
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -147,12 +161,31 @@ class CodeSageMCPServer:
                                 "type": "integer",
                                 "description": "Starting line number (optional)",
                             },
-                            "line_end": {
-                                "type": "integer",
-                                "description": "Ending line number (optional)",
-                            },
                         },
                         "required": ["file_path"],
+                    },
+                ),
+                Tool(
+                    name="review_code",
+                    description="Review current code changes or a specific file for security, bugs, and improvements.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Specific file to review (optional)",
+                            },
+                            "staged_only": {
+                                "type": "boolean",
+                                "description": "Review only staged changes (default: false)",
+                                "default": False,
+                            },
+                            "use_llm": {
+                                "type": "boolean",
+                                "description": "Use LLM for deeper insights (default: true)",
+                                "default": True,
+                            }
+                        },
                     },
                 ),
                 Tool(
@@ -188,6 +221,20 @@ class CodeSageMCPServer:
                         },
                     },
                 ),
+                Tool(
+                    name="get_task_context",
+                    description="Get comprehensive context for a coding task: relevant files, learned patterns, and user preferences.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task_description": {
+                                "type": "string",
+                                "description": "Description of what you want to do (e.g. 'implement user login', 'refactor database connection')",
+                            },
+                        },
+                        "required": ["task_description"],
+                    },
+                ),
             ]
 
         @self.server.call_tool()
@@ -198,10 +245,14 @@ class CodeSageMCPServer:
                     result = await self._tool_search_code(arguments)
                 elif name == "get_file_context":
                     result = await self._tool_get_file_context(arguments)
+                elif name == "review_code":
+                    result = await self._tool_review_code(arguments)
                 elif name == "analyze_security":
                     result = await self._tool_analyze_security(arguments)
                 elif name == "get_stats":
                     result = await self._tool_get_stats(arguments)
+                elif name == "get_task_context":
+                    result = await self._tool_get_task_context(arguments)
                 else:
                     result = {"error": f"Unknown tool: {name}"}
 
@@ -293,13 +344,106 @@ class CodeSageMCPServer:
         }
         language = language_map.get(suffix, "text")
 
+        # Get definitions in file
+        definitions = []
+        try:
+            elements = self.db.get_elements_for_file(file_path)
+            for el in elements:
+                definitions.append({
+                    "name": el.name,
+                    "type": el.type,
+                    "line": el.line_start,
+                    "signature": el.signature
+                })
+        except Exception:
+            pass
+
+        # Run quick security scan on this file
+        security_issues = []
+        try:
+            from codesage.security.scanner import SecurityScanner
+            scanner = SecurityScanner()
+            findings = scanner.scan_file(full_path)
+            for f in findings:
+                security_issues.append({
+                    "severity": f.rule.severity.value,
+                    "line": f.line_number,
+                    "message": f.rule.message,
+                    "suggestion": f.rule.fix_suggestion
+                })
+        except Exception:
+            pass
+
         return {
             "file": file_path,
             "language": language,
             "line_start": (line_start or 0) + 1,
             "line_count": len(lines),
             "content": content,
+            "definitions": definitions,
+            "security_issues": security_issues,
         }
+
+    async def _tool_review_code(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute review_code tool."""
+        file_path = args.get("file_path")
+        staged_only = args.get("staged_only", False)
+        use_llm = args.get("use_llm", True)
+
+        try:
+            from codesage.review.hybrid_analyzer import HybridReviewAnalyzer
+
+            analyzer = HybridReviewAnalyzer(config=self.config, repo_path=self.project_path)
+
+            # If specific file requested, we need to construct a change object or filter
+            # But the analyzer works on Diff objects locally.
+            # For simplicity, if file_path is provided, we analyze just that file if it changed,
+            # OR we fallback to static analysis of that file if no diff exists.
+
+            changes = None
+            if file_path:
+                # Review specific file path - getting changes might be tricky if not in git
+                # For now, let's get all changes and filter
+                all_changes = analyzer.get_all_changes()
+                changes = [c for c in all_changes if str(c.path) == file_path]
+
+                # If no git changes for this file, we might want to still review it?
+                # HybridAnalyzer relies on diffs for context.
+                # If no diff, we return early
+                if not changes:
+                    return {"message": "No uncommitted changes found for this file to review."}
+            else:
+                 if staged_only:
+                     changes = analyzer.get_staged_changes()
+                 else:
+                     changes = analyzer.get_all_changes()
+
+            result = analyzer.review_changes(
+                changes=changes,
+                use_llm_synthesis=use_llm
+            )
+
+            return {
+                "summary": result.summary,
+                "stats": {
+                    "critical": result.critical_count,
+                    "warnings": result.warning_count,
+                    "security_issues": len([i for i in result.issues if i.severity.name in ("CRITICAL", "WARNING")]),
+                },
+                "issues": [
+                    {
+                        "file": str(i.file),
+                        "line": i.line,
+                        "severity": i.severity.name,
+                        "message": i.message,
+                        "suggestion": i.suggestion
+                    }
+                    for i in result.issues
+                ]
+            }
+
+        except Exception as e:
+            return {"error": f"Review failed: {e}"}
 
     async def _tool_analyze_security(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute analyze_security tool."""
@@ -362,6 +506,84 @@ class CodeSageMCPServer:
                 result["storage_metrics"] = {"error": str(e)}
 
         return result
+
+    async def _tool_get_task_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute get_task_context tool."""
+        task = args.get("task_description", "")
+        if not task:
+            return {"error": "task_description is required"}
+
+        context = {
+            "task": task,
+            "relevant_code": [],
+            "learned_patterns": [],
+            "user_preferences": {},
+            "related_concepts": [],
+        }
+
+        # 1. Search for relevant code
+        try:
+            search_results = self.suggester.find_similar(
+                query=task,
+                limit=3,
+                min_similarity=0.3,
+            )
+            context["relevant_code"] = [
+                {
+                    "file": str(s.file),
+                    "name": s.name,
+                    "type": s.element_type,
+                    "similarity": round(s.similarity, 2),
+                    "summary": s.docstring[:100] if s.docstring else "No docstring",
+                }
+                for s in search_results
+            ]
+        except Exception as e:
+            logger.warning(f"Task search failed: {e}")
+
+        # 2. Get learned patterns and preferences from MemoryManager
+        try:
+            # Find patterns similar to task (e.g. "auth", "api", "error handling")
+            patterns = self.memory.find_similar_patterns(task, limit=3)
+            context["learned_patterns"] = [
+                {
+                    "name": p.get("name"),
+                    "description": p.get("description"),
+                    "confidence": p.get("confidence", 0),
+                    "category": p.get("category"),
+                }
+                for p in patterns
+            ]
+
+            # Get user preferences (general)
+            prefs = self.memory.get_all_preferences(category="general")
+            context["user_preferences"] = prefs
+
+            # Try to infer specialized preferences
+            # e.g. if task mentions "test", add test preferences
+            if "test" in task.lower():
+                test_prefs = self.memory.get_all_preferences(category="testing")
+                context["user_preferences"].update(test_prefs)
+
+        except Exception as e:
+            logger.warning(f"Memory lookup failed: {e}")
+            context["memory_error"] = str(e)
+
+        # 3. Identify related concepts/files (Cross-referencing)
+        # If we found code, let's look for what IT relates to
+        if context["relevant_code"]:
+            primary_match = context["relevant_code"][0]
+            try:
+                # Naive impact analysis: what files contain elements similar to this?
+                # or simplified: just list what other files are in the same module/directory
+                path = Path(primary_match["file"])
+                siblings = [p.name for p in path.parent.glob("*") if p.is_file() and p.name != path.name][:5]
+                if siblings:
+                    context["related_concepts"].append(f"Files in {path.parent}: {', '.join(siblings)}")
+            except Exception:
+                pass
+
+        return context
 
     def _register_resources(self) -> None:
         """Register MCP resources."""

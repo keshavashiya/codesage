@@ -7,6 +7,7 @@ for Claude Desktop integration.
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -198,46 +199,23 @@ def install(
     from codesage.utils.config import Config
 
     console = get_console()
-    project_path = Path(path).resolve()
 
-    # Load project config
-    try:
-        config = Config.load(project_path)
-    except FileNotFoundError:
-        print_error(f"Project not initialized at {project_path}")
-        raise typer.Exit(1)
+    server_name = name or "codesage"
+    codesage_cmd = shutil.which("codesage") or "codesage"
 
-    if name:
-        server_name = name
-    elif config.project_name == "codesage":
-        server_name = "codesage"
-    else:
-        server_name = f"codesage-{config.project_name}"
-
-    # Show project info
+    # Show server info
     console.print(
         Panel(
-            f"[bold]Project:[/bold] {config.project_name}\n"
-            f"[bold]Path:[/bold] {project_path}\n"
             f"[bold]Server Name:[/bold] {server_name}\n"
+            f"[bold]Mode:[/bold] Global (All Projects)\n"
             f"[bold]Transport:[/bold] {transport}",
             title="CodeSage MCP Server Configuration",
-            border_style="cyan",
+            border_style="green",
         )
     )
 
     console.print()
-
-    # Multi-project recommendation
-    console.print("[bold yellow]� Working with Multiple Projects:[/bold yellow]")
-    console.print()
-    console.print("  [bold green]Recommended:[/bold green] Use global mode for multi-project access:")
-    console.print(f"  [cyan]codesage mcp serve --global[/cyan]")
-    console.print()
-    console.print("  This serves ALL indexed projects with a single server!")
-    console.print("  Tools accept a [bold]project_name[/bold] parameter to target specific projects.")
-    console.print()
-    console.print("  [dim]Alternative: Run separate servers per project (not recommended)[/dim]")
+    console.print("[dim]This setup serves ALL indexed CodeSage projects through a single MCP server.[/dim]")
     console.print()
 
     # Stdio configuration
@@ -253,8 +231,8 @@ def install(
         claude_config = {
             "mcpServers": {
                 server_name: {
-                    "command": "codesage",
-                    "args": ["mcp", "serve", str(project_path)]  # Absolute path required
+                    "command": codesage_cmd,
+                    "args": ["mcp", "serve", "--global"]
                 }
             }
         }
@@ -269,8 +247,8 @@ def install(
         cursor_config = {
             "mcpServers": {
                 server_name: {
-                    "command": "codesage",
-                    "args": ["mcp", "serve", str(project_path)]  # Absolute path required
+                    "command": codesage_cmd,
+                    "args": ["mcp", "serve", "--global"]
                 }
             }
         }
@@ -284,8 +262,8 @@ def install(
 
         windsurf_config = {
             "name": server_name,
-            "command": "codesage",
-            "args": ["mcp", "serve", str(project_path)]  # Absolute path required
+            "command": codesage_cmd,
+            "args": ["mcp", "serve", "--global"]
         }
         console.print(Syntax(json.dumps(windsurf_config, indent=2), "json", theme="monokai"))
         console.print()
@@ -299,8 +277,8 @@ from mcp.client.stdio import stdio_client
 
 async def connect():
     params = StdioServerParameters(
-        command="codesage",
-        args=["mcp", "serve", "/path/to/your/project"] # Replace with your project path
+        command="{codesage_cmd}",
+        args=["mcp", "serve", "--global"]
     )
 
     async with stdio_client(params) as (read, write):
@@ -544,41 +522,29 @@ def list_servers(
 @app.command("config")
 @handle_errors
 def show_config(
-    path: str = typer.Argument(".", help="Project directory"),
+        path: str = typer.Argument(".", help="Project directory (ignored, always uses global mode)"),
 ) -> None:
-    """Show MCP server configuration for a project.
+    """Show MCP server configuration.
 
-    Displays the configuration that would be added to Claude Desktop.
+    Generates the configuration for the Global CodeSage MCP Server.
+    The global server handles all indexed projects and enables cross-project intelligence.
     """
-    from codesage.utils.config import Config
-
     console = get_console()
-    project_path = Path(path).resolve()
-
-    try:
-        config = Config.load(project_path)
-    except FileNotFoundError:
-        print_error(f"Project not initialized at {project_path}")
-        raise typer.Exit(1)
-
-    if config.project_name == "codesage":
-        server_name = "codesage"
-    else:
-        server_name = f"codesage-{config.project_name}"
+    codesage_cmd = shutil.which("codesage") or "codesage"
 
     mcp_config = {
-        server_name: {
-            "command": "codesage",
-            "args": ["mcp", "serve", str(project_path)],
+        "codesage": {
+            "command": codesage_cmd,
+            "args": ["mcp", "serve", "--global"],
         }
     }
 
     console.print(
         Panel(
-            f"[bold]Project:[/bold] {config.project_name}\n"
-            f"[bold]Path:[/bold] {project_path}",
+            f"[bold]Mode:[/bold] Global (All Projects)\n"
+            f"[bold]Command:[/bold] {codesage_cmd} mcp serve --global",
             title="MCP Server Configuration",
-            border_style="blue",
+            border_style="green",
         )
     )
 

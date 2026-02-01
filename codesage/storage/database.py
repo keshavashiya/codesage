@@ -251,6 +251,41 @@ class Database(ConnectionManager):
         self.conn.commit()
         return cursor.rowcount
 
+    def get_elements_for_file(self, file_path: str) -> List[CodeElement]:
+        """Get all elements defined in a specific file.
+
+        Args:
+            file_path: Relative or absolute path to the file.
+
+        Returns:
+            List of CodeElement.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT id, file, type, name, code, language, line_start, line_end,
+                   docstring, signature
+            FROM code_elements WHERE file LIKE ?
+            ORDER BY line_start ASC
+            """,
+            (f"%{file_path}",),
+        )
+
+        elements = []
+        for row in cursor.fetchall():
+            elements.append(CodeElement(
+                id=row["id"],
+                file=Path(row["file"]),
+                type=row["type"],
+                name=row["name"],
+                code=row["code"],
+                language=row["language"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+                docstring=row["docstring"],
+                signature=row["signature"],
+            ))
+        return elements
+
     # -------------------------------------------------------------------------
     # Statistics Operations
     # -------------------------------------------------------------------------
