@@ -1,8 +1,8 @@
 """Data models for suggestions."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -19,9 +19,18 @@ class Suggestion:
     explanation: Optional[str] = None
     docstring: Optional[str] = None
 
+    # Graph context (from KuzuDB)
+    callers: List[Dict[str, Any]] = field(default_factory=list)
+    callees: List[Dict[str, Any]] = field(default_factory=list)
+    superclasses: List[Dict[str, Any]] = field(default_factory=list)
+    subclasses: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Pattern context (from memory system)
+    matching_patterns: List[Dict[str, Any]] = field(default_factory=list)
+
     def to_dict(self) -> dict:
         """Convert to dictionary."""
-        return {
+        result = {
             "file": str(self.file),
             "line": self.line,
             "code": self.code,
@@ -32,6 +41,24 @@ class Suggestion:
             "explanation": self.explanation,
             "docstring": self.docstring,
         }
+
+        # Include graph context if present
+        if self.callers:
+            result["callers"] = self.callers
+        if self.callees:
+            result["callees"] = self.callees
+        if self.superclasses:
+            result["superclasses"] = self.superclasses
+        if self.subclasses:
+            result["subclasses"] = self.subclasses
+        if self.matching_patterns:
+            result["matching_patterns"] = self.matching_patterns
+
+        return result
+
+    def has_graph_context(self) -> bool:
+        """Check if suggestion has graph context."""
+        return bool(self.callers or self.callees or self.superclasses or self.subclasses)
 
 
 @dataclass

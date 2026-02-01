@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pycodesage"
-version = "0.1.2"
+version = "0.2.1"
 description = "Local-first CLI code intelligence tool with LangChain-powered RAG"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Keshav Ashiya"}
@@ -17,8 +17,8 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
 ]
 
 dependencies = [
@@ -30,21 +30,34 @@ dependencies = [
     "langchain>=0.3.0",
     "langchain-community>=0.3.0",
     "langchain-ollama>=0.2.0",
-    "langchain-chroma>=0.1.0",
 
-    # Storage
-    "chromadb>=0.4.0",
+    # Storage - Vector & Graph
+    "lancedb>=0.4.0",
+    "kuzu>=0.3.0",
+    "pyarrow>=14.0.0",
 
     # Utils
     "pyyaml>=6.0.0",
     "gitpython>=3.1.0",
     "numpy>=1.26.0,<2.0.0",
+    "pandas>=2.0.0",
 ]
 
 [project.optional-dependencies]
 openai = ["langchain-openai>=0.1.0"]
 anthropic = ["langchain-anthropic>=0.1.0"]
-multi-language = ["tree-sitter>=0.20.0"]
+multi-language = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-go>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+]
+mcp = [
+    "mcp>=1.0.0",
+    "starlette>=0.27.0",  # Required for SSE transport
+    "uvicorn>=0.23.0",     # ASGI server for HTTP/SSE
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -54,7 +67,7 @@ dev = [
     "mypy>=1.7.0",
 ]
 all = [
-    "codesage[openai,anthropic,multi-language,dev]",
+    "pycodesage[openai,anthropic,multi-language,mcp,dev]",
 ]
 
 [project.scripts]
@@ -66,16 +79,16 @@ include = ["codesage*"]
 
 [tool.black]
 line-length = 88
-target-version = ['py39']
+target-version = ['py310']
 
 [tool.ruff]
 line-length = 88
-target-version = "py39"
+target-version = "py310"
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

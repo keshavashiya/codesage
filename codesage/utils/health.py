@@ -3,7 +3,7 @@
 Provides health checks for all system dependencies:
 - Ollama LLM service
 - SQLite database
-- ChromaDB vector store
+- LanceDB vector store
 - Disk space
 """
 
@@ -132,43 +132,40 @@ def check_database(db_path: Path) -> Tuple[bool, Optional[str], Optional[float]]
         return False, f"Database check failed: {e}", None
 
 
-def check_vector_store(chroma_path: Path) -> Tuple[bool, Optional[str], Optional[int]]:
-    """Check if ChromaDB vector store is accessible.
+def check_vector_store(lance_path: Path) -> Tuple[bool, Optional[str], Optional[int]]:
+    """Check if LanceDB vector store is accessible.
 
     Args:
-        chroma_path: Path to ChromaDB directory
+        lance_path: Path to LanceDB directory
 
     Returns:
         Tuple of (is_accessible, error_message, document_count)
     """
     try:
-        if not chroma_path.exists():
-            return False, f"Vector store not found: {chroma_path}", None
+        if not lance_path.exists():
+            return False, f"Vector store not found: {lance_path}", None
 
-        # Check for ChromaDB files
-        chroma_files = list(chroma_path.glob("**/*"))
-        if not chroma_files:
+        # Check for LanceDB files
+        lance_files = list(lance_path.glob("**/*"))
+        if not lance_files:
             return False, "Vector store is empty", 0
 
-        # Try to get document count (basic check without loading full ChromaDB)
-        # This is a lightweight check - full validation requires loading the store
-        sqlite_file = chroma_path / "chroma.sqlite3"
-        if sqlite_file.exists():
-            import sqlite3
-            conn = sqlite3.connect(str(sqlite_file), timeout=5)
-            try:
-                cursor = conn.execute(
-                    "SELECT COUNT(*) FROM embeddings"
-                )
-                count = cursor.fetchone()[0]
-                conn.close()
-                return True, None, count
-            except sqlite3.Error:
-                conn.close()
-                # Table might not exist yet, that's ok
-                return True, None, 0
+        # Try to get document count by loading LanceDB
+        try:
+            import lancedb
+            db = lancedb.connect(str(lance_path))
+            tables = db.table_names()
 
-        return True, None, None
+            if "code_elements" in tables:
+                table = db.open_table("code_elements")
+                count = table.count_rows()
+                return True, None, count
+            else:
+                # No table yet, that's ok for new projects
+                return True, None, 0
+        except Exception:
+            # LanceDB might not be fully initialized
+            return True, None, 0
 
     except Exception as e:
         return False, f"Vector store check failed: {e}", None
@@ -228,9 +225,9 @@ def check_system_health(config) -> HealthStatus:
     else:
         status.errors.append("Database path not configured")
 
-    # Check Vector Store
-    if config.storage.chroma_path:
-        vs_ok, vs_err, vs_count = check_vector_store(config.storage.chroma_path)
+    # Check Vector Store (LanceDB)
+    if config.storage.lance_path:
+        vs_ok, vs_err, vs_count = check_vector_store(config.storage.lance_path)
         status.vector_store_accessible = vs_ok
         status.vector_count = vs_count
         if vs_err:

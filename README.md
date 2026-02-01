@@ -1,200 +1,166 @@
 # CodeSage
 
-**Local-first CLI code intelligence tool with LangChain-powered RAG**
+Local-first code intelligence CLI with MCP support for Claude Desktop, Cursor, and Windsurf.
 
-CodeSage indexes your codebase and enables semantic code search using AI. Everything runs locally on your machine with Ollama.
+Index your codebase and search it using natural language. Everything runs locally with Ollama.
+Supports Python, JavaScript, TypeScript, Go, and Rust.
 
-## Features
+## Install
 
-- **Semantic Code Search** - Find code using natural language queries
-- **AI-Powered Suggestions** - Get intelligent code recommendations from your codebase
-- **100% Local** - Everything runs on your machine with Ollama, no cloud required
-- **Fast Indexing** - Incremental updates only re-index changed files
-- **Python Support** - Full Python AST parsing
+### Recommended: pipx
 
-## Requirements
+We strongly recommend installing CodeSage with [pipx](https://pypa.github.io/pipx/) to run it in an isolated environment.
 
-- **Python 3.9+**
-- **Ollama** - Local LLM runtime ([Install Ollama](https://ollama.ai))
+1.  **Install pipx** (if not already installed):
 
-### Setting Up Ollama
+    ```bash
+    # macOS
+    brew install pipx
+    pipx ensurepath
 
-```bash
-# Install Ollama from https://ollama.ai, then pull required models:
-ollama pull qwen2.5-coder:7b      # For code analysis (~4.4GB)
-ollama pull mxbai-embed-large     # For embeddings (~670MB)
-```
+    # Linux/Windows
+    python3 -m pip install --user pipx
+    python3 -m pipx ensurepath
+    ```
 
-## Installation
+2.  **Install CodeSage**:
 
-### From PyPI
+    ```bash
+    pipx install pycodesage
+    ```
+
+    *Note: To add optional features later (e.g., multi-language support), use `pipx inject`:*
+    ```bash
+    pipx inject pycodesage pycodesage[multi-language]
+    ```
+
+### Alternative: pip
+
+You can also install via standard pip, though this may conflict with other packages:
 
 ```bash
 pip install pycodesage
 ```
 
-### From Source (Development)
+Or from source:
 
 ```bash
-# Clone the repository
 git clone https://github.com/keshavashiya/codesage.git
 cd codesage
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install in development mode
-pip install -e ".[dev]"
+pip install -e .
 ```
 
-### Optional: OpenAI/Anthropic Support
+## Requirements
+
+**Ollama** must be running with these models:
 
 ```bash
-pip install pycodesage[openai]      # For OpenAI
-pip install pycodesage[anthropic]   # For Anthropic Claude
+ollama pull qwen2.5-coder:7b
+ollama pull mxbai-embed-large
+ollama serve
 ```
 
-## Quick Start
+## Usage
 
 ```bash
-# Navigate to your project
+# Initialize and index your project
 cd your-project
-
-# Initialize CodeSage
 codesage init
-
-# Index the codebase
 codesage index
 
-# Search for code
-codesage suggest "function to validate email"
+# Search your code
+codesage suggest "validate email"
+
+# Check everything is working
+codesage health
 ```
+
+## MCP Setup
+
+```json
+{
+  "mcpServers": {
+    "codesage": {
+      "command": "codesage",
+      "args": ["mcp", "serve", "--global"]
+    }
+  }
+}
+```
+
+<details>
+<summary>Other MCP clients (Cursor, Windsurf)</summary>
+
+**Cursor:** Settings → Features → MCP Servers, add same config.
+
+**Windsurf:** Settings → MCP → Add Server. Command: `codesage`, Args: `mcp serve --global`
+
+</details>
 
 ## Commands
 
-### `codesage init [PATH]`
-
-Initialize CodeSage in a project directory.
-
 ```bash
-codesage init                              # Initialize in current directory
-codesage init /path/to/project             # Initialize in specific directory
-codesage init --model qwen2.5-coder:7b     # Specify LLM model
-codesage init --embedding-model mxbai-embed-large  # Specify embedding model
+codesage init           # Initialize project
+codesage index          # Index codebase
+codesage suggest QUERY  # Search code
+codesage stats          # Show stats
+codesage health         # System check
+codesage review         # AI code review
+codesage chat           # Interactive mode
 ```
 
-### `codesage index [PATH]`
-
-Index the codebase for semantic search.
-
-```bash
-codesage index                # Incremental index (only changed files)
-codesage index --full         # Force full reindex
-codesage index --clear        # Clear existing index before indexing
-```
-
-### `codesage suggest QUERY`
-
-Search for code using natural language.
+<details>
+<summary>More commands</summary>
 
 ```bash
-codesage suggest "error handling"           # Search with default settings
-codesage suggest "database query" -n 10     # Return 10 results (default: 5)
-codesage suggest "auth logic" -s 0.5        # Set minimum similarity threshold
-codesage suggest "config" --no-explain      # Skip AI explanations (faster)
-codesage suggest "utils" -p /path/to/proj   # Search in specific project
+# MCP
+codesage mcp serve          # Start server
+codesage mcp serve --global # All projects
+codesage mcp test           # Test tools
+
+# Security
+codesage security scan      # Scan vulnerabilities
+codesage hooks install      # Pre-commit hook
+
+# Storage
+codesage storage info       # Backend details
+codesage storage stats      # Metrics
+
+# Profile
+codesage profile show       # Developer profile
+codesage profile patterns   # Learned patterns
 ```
 
-### `codesage stats`
-
-Show index statistics.
-
-```bash
-codesage stats                # Show stats for current directory
-codesage stats /path/to/proj  # Show stats for specific project
-```
-
-### `codesage health`
-
-Check system health and dependencies.
-
-```bash
-codesage health               # Check Ollama, database, disk space
-```
-
-### `codesage version`
-
-Show CodeSage version.
-
-```bash
-codesage version
-```
+</details>
 
 ## Configuration
 
-Configuration is stored in `.codesage/config.yaml`:
+Stored in `.codesage/config.yaml`:
 
 ```yaml
 project_name: my-project
-language: python
+languages:
+  - python
+  - typescript
 
 llm:
   provider: ollama
   model: qwen2.5-coder:7b
   embedding_model: mxbai-embed-large
-  base_url: http://localhost:11434
-  temperature: 0.3
-  max_tokens: 500
-  request_timeout: 30.0
-  max_retries: 3
-
-storage:
-  vector_store: chromadb
 
 exclude_dirs:
   - venv
   - node_modules
   - .git
-  - __pycache__
-```
-
-### Using OpenAI or Anthropic
-
-```bash
-export CODESAGE_API_KEY="your-api-key"
-```
-
-```yaml
-llm:
-  provider: openai           # or anthropic
-  model: gpt-4o-mini         # or claude-3-haiku-20240307
 ```
 
 ## Development
 
 ```bash
-# Run tests
+pip install -e ".[dev]"
 pytest tests/ -v
-
-# Format code
-black codesage tests
-
-# Lint
-ruff check codesage
 ```
 
-## Troubleshooting
+## License
 
-### "Ollama connection failed"
-
-```bash
-ollama serve  # Make sure Ollama is running
-```
-
-### "Model not found"
-
-```bash
-ollama pull qwen2.5-coder:7b
-ollama pull mxbai-embed-large
-```
+MIT
