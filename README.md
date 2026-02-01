@@ -26,8 +26,14 @@ We strongly recommend installing CodeSage with [pipx](https://pypa.github.io/pip
 2.  **Install CodeSage**:
 
     ```bash
-    pipx install pycodesage
+    # Install Python 3.10+ (Recommended)
+    brew install python@3.11
+
+    # Install CodeSage using the specific python version
+    pipx install --python python3.11 pycodesage
     ```
+
+    *Note: You can use any installed Python version >= 3.10 (e.g., `python3.10`, `python3.12`).*
 
     *Note: To add optional features later (e.g., multi-language support), use `pipx inject`:*
     ```bash
