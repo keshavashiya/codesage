@@ -37,6 +37,7 @@ We strongly recommend installing CodeSage with [pipx](https://pypa.github.io/pip
 
     *Note: To add optional features later (e.g., multi-language support), use `pipx inject`:*
     ```bash
+    pipx inject pycodesage mcp
     pipx inject pycodesage pycodesage[multi-language]
     ```
 
