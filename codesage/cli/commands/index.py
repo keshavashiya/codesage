@@ -10,6 +10,46 @@ from codesage.cli.utils.decorators import handle_errors
 from codesage.cli.utils.signals import register_cleanup, unregister_cleanup
 
 
+def _print_parser_availability_hint(console, project_path: Path, files_scanned: int) -> None:
+    """Print helpful hints about parser availability for scanned files.
+
+    Detects if JS/TS or other non-Python files were scanned but couldn't be indexed
+    due to missing tree-sitter parsers.
+    """
+    from codesage.parsers import ParserRegistry
+    from codesage.utils.language_detector import detect_languages
+
+    # Get registered parsers
+    registered_langs = set(ParserRegistry.supported_languages())
+
+    # Detect languages in the project
+    try:
+        detected = detect_languages(project_path)
+        detected_langs = {lang.name for lang in detected}
+    except Exception:
+        detected_langs = set()
+
+    # Check for languages detected but not supported
+    missing_langs = detected_langs - registered_langs
+
+    if missing_langs:
+        # Non-Python languages detected but parsers not available
+        lang_list = ", ".join(sorted(missing_langs))
+        console.print(f"  Detected [yellow]{lang_list}[/yellow] files but parsers are not installed.")
+        console.print(
+            "  Install multi-language support with:\n"
+            "    [cyan]pipx inject pycodesage 'pycodesage[multi-language]'[/cyan]\n"
+            "  Or if using pip:\n"
+            "    [cyan]pip install 'pycodesage[multi-language]'[/cyan]\n"
+        )
+    elif files_scanned > 0 and "python" not in detected_langs:
+        # Files were scanned but no recognized language
+        console.print("  No supported source files found in this project.\n")
+        console.print("  Supported languages: Python, JavaScript, TypeScript, Go, Rust\n")
+    else:
+        console.print("  Check that you have source files in your project.\n")
+
+
 @handle_errors
 def index(
     path: str = typer.Argument(".", help="Project directory to index"),
@@ -108,4 +148,5 @@ def index(
         console.print("  Try: [cyan]codesage suggest 'your query'[/cyan]\n")
     else:
         print_warning("No code elements found.")
-        console.print("  Check that you have Python files in your project.\n")
+        # Check if non-Python files were scanned but no parser is available
+        _print_parser_availability_hint(console, project_path, stats["files_scanned"])

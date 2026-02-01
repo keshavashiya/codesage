@@ -78,15 +78,17 @@ def serve(
         # Global mode: serve all projects
         from codesage.mcp.global_server import GlobalCodeSageMCPServer
 
-        console.print(
-            Panel(
-                f"[bold]Mode:[/bold] Global (all projects)\n"
-                f"[bold]Transport:[/bold] {transport}\n"
-                + (f"[bold]Endpoint:[/bold] http://{host}:{port}/sse" if transport == "sse" else ""),
-                title="🌐 CodeSage Global MCP Server",
-                border_style="green",
+        # Only show panel for SSE transport (stdio must have clean stdout for JSON-RPC)
+        if transport == "sse":
+            console.print(
+                Panel(
+                    f"[bold]Mode:[/bold] Global (all projects)\n"
+                    f"[bold]Transport:[/bold] {transport}\n"
+                    f"[bold]Endpoint:[/bold] http://{host}:{port}/sse",
+                    title="🌐 CodeSage Global MCP Server",
+                    border_style="green",
+                )
             )
-        )
 
         try:
             global_server = GlobalCodeSageMCPServer()
@@ -97,7 +99,8 @@ def serve(
                 asyncio.run(global_server.run_sse(host=host, port=port))
 
         except KeyboardInterrupt:
-            console.print("\n[yellow]Server stopped by user[/yellow]")
+            if transport == "sse":
+                console.print("\n[yellow]Server stopped by user[/yellow]")
         except Exception as e:
             print_error(f"Server error: {e}")
             raise typer.Exit(1)
@@ -116,17 +119,19 @@ def serve(
             console.print("Run 'codesage init' first")
             raise typer.Exit(1)
 
-        console.print(
-            Panel(
-                f"[bold]Mode:[/bold] Project\n"
-                f"[bold]Project:[/bold] {config.project_name}\n"
-                f"[bold]Path:[/bold] {project_path}\n"
-                f"[bold]Transport:[/bold] {transport}\n"
-                + (f"[bold]Endpoint:[/bold] http://{host}:{port}/sse" if transport == "sse" else ""),
-                title="📦 CodeSage MCP Server",
-                border_style="cyan",
+        # Only show panel for SSE transport (stdio must have clean stdout for JSON-RPC)
+        if transport == "sse":
+            console.print(
+                Panel(
+                    f"[bold]Mode:[/bold] Project\n"
+                    f"[bold]Project:[/bold] {config.project_name}\n"
+                    f"[bold]Path:[/bold] {project_path}\n"
+                    f"[bold]Transport:[/bold] {transport}\n"
+                    f"[bold]Endpoint:[/bold] http://{host}:{port}/sse",
+                    title="📦 CodeSage MCP Server",
+                    border_style="cyan",
+                )
             )
-        )
 
     # Run the server
     try:
