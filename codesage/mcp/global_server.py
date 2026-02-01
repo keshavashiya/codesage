@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mcp.server import Server
-from mcp.types import Resource, TextContent, Tool
+from mcp.types import CallToolResult, Resource, TextContent, Tool
 
 from codesage.utils.config import Config
 from codesage.utils.logging import get_logger
@@ -196,7 +196,7 @@ class GlobalCodeSageMCPServer:
             ]
 
         @self.server.call_tool()
-        async def call_tool(name: str, arguments: Any) -> List[TextContent]:
+        async def call_tool(name: str, arguments: Any) -> CallToolResult:
             """Handle tool calls."""
             try:
                 if name == "list_projects":
@@ -210,17 +210,25 @@ class GlobalCodeSageMCPServer:
                 else:
                     result = {"error": f"Unknown tool: {name}"}
 
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(result, indent=2, default=str),
-                )]
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps(result, indent=2, default=str),
+                        )
+                    ]
+                )
 
             except Exception as e:
                 logger.error(f"Tool {name} failed: {e}")
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"error": str(e)}),
-                )]
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps({"error": str(e)}),
+                        )
+                    ]
+                )
 
     def _register_resources(self) -> None:
         """Register MCP resources."""

@@ -21,6 +21,7 @@ try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
     from mcp.types import (
+        CallToolResult,
         TextContent,
         Tool,
         Resource,
@@ -190,7 +191,7 @@ class CodeSageMCPServer:
             ]
 
         @self.server.call_tool()
-        async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
+        async def call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
             """Handle tool calls."""
             try:
                 if name == "search_code":
@@ -204,17 +205,25 @@ class CodeSageMCPServer:
                 else:
                     result = {"error": f"Unknown tool: {name}"}
 
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(result, indent=2, default=str),
-                )]
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps(result, indent=2, default=str),
+                        )
+                    ]
+                )
 
             except Exception as e:
                 logger.error(f"Tool {name} failed: {e}")
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"error": str(e)}),
-                )]
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps({"error": str(e)}),
+                        )
+                    ]
+                )
 
     async def _tool_search_code(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute search_code tool."""
