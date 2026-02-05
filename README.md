@@ -30,8 +30,8 @@ python3 -m pipx ensurepath
 pipx install --python python3.11 pycodesage
 
 # Add optional features
-pipx inject pycodesage pycodesage[multi-language]  # JS, TS, Go, Rust
-pipx inject pycodesage pycodesage[mcp]             # MCP server
+pipx inject pycodesage "pycodesage[multi-language]"  # JS, TS, Go, Rust
+pipx inject pycodesage "pycodesage[mcp]"             # MCP server
 ```
 
 </details>
