@@ -57,8 +57,12 @@ def info(
 
     if config.storage.lance_path.exists():
         try:
-            embedder = EmbeddingService(config.llm, config.cache_dir)
-            storage = StorageManager(config, embedding_fn=embedder.embedder)
+            embedder = EmbeddingService(
+                config.llm,
+                config.cache_dir,
+                config.performance,
+            )
+            storage = StorageManager(config, embedding_fn=embedder)
             lance_count = storage.vector_store.count()
             console.print(f"  [green]LanceDB: {lance_count} documents[/green]")
         except Exception:
@@ -93,8 +97,12 @@ def stats(
         raise typer.Exit(1)
 
     try:
-        embedder = EmbeddingService(config.llm, config.cache_dir)
-        storage = StorageManager(config, embedding_fn=embedder.embedder)
+        embedder = EmbeddingService(
+            config.llm,
+            config.cache_dir,
+            config.performance,
+        )
+        storage = StorageManager(config, embedding_fn=embedder)
     except Exception as e:
         print_error(f"Failed to initialize storage: {e}")
         raise typer.Exit(1)
@@ -212,8 +220,12 @@ def repair(
     console.print("[cyan]Checking storage consistency...[/cyan]")
 
     try:
-        embedder = EmbeddingService(config.llm, config.cache_dir)
-        storage = StorageManager(config, embedding_fn=embedder.embedder)
+        embedder = EmbeddingService(
+            config.llm,
+            config.cache_dir,
+            config.performance,
+        )
+        storage = StorageManager(config, embedding_fn=embedder)
     except Exception as e:
         print_error(f"Failed to initialize storage: {e}")
         raise typer.Exit(1)

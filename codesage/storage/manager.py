@@ -72,11 +72,8 @@ class StorageManager:
         if self._embedding_fn is None:
             raise ValueError("embedding_fn required for LanceDB")
 
-        # If embedding_fn is a LangChain embedder, wrap it
-        if hasattr(self._embedding_fn, 'embed_documents'):
-            embed_fn = create_lance_embedding_fn(self._embedding_fn)
-        else:
-            embed_fn = self._embedding_fn
+        # Wrap embedding function to support EmbeddingService, LangChain, or callables
+        embed_fn = create_lance_embedding_fn(self._embedding_fn)
 
         self._vector_store = LanceVectorStore(
             persist_dir=self.config.storage.lance_path,
@@ -225,7 +222,23 @@ class StorageManager:
                         result["superclasses"] = self.graph_store.get_superclasses(node_id)
                         result["subclasses"] = self.graph_store.get_subclasses(node_id)
 
+                    # Additional graph enrichment if enabled
+                    if getattr(self.config.features, "graph_enriched_search", False):
+                        result["dependencies"] = self.graph_store.get_dependencies(node_id)
+                        result["dependents"] = self.graph_store.get_dependents(node_id)
+                        result["impact_score"] = self._calculate_impact_score(node_id)
+
         return results
+
+    def _calculate_impact_score(self, node_id: str) -> float:
+        """Calculate a simple impact score based on caller counts."""
+        if not self.graph_store:
+            return 0.0
+
+        direct_callers = self.graph_store.get_callers(node_id)
+        transitive = self.graph_store.get_transitive_callers(node_id, max_depth=2)
+        score = (len(direct_callers) + len(transitive)) / 50.0
+        return min(1.0, score)
 
     def delete_by_file(self, file_path: Path) -> None:
         """Delete all data for a specific file.

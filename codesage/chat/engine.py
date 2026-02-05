@@ -1,16 +1,39 @@
 """Chat engine for interactive code conversations."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from codesage.llm.provider import LLMProvider
 from codesage.storage.database import Database
 from codesage.utils.config import Config
 from codesage.utils.logging import get_logger
+from codesage.core.context_provider import ContextProvider
 
-from .commands import ChatCommand, CommandParser, ParsedCommand
+from .commands import ChatCommand, ChatMode, CommandParser, ParsedCommand
 from .context import CodeContextBuilder
 from .models import ChatMessage, ChatSession
-from .prompts import CHAT_HELP, CHAT_SYSTEM_PROMPT
+from .prompts import (
+    BRAINSTORM_CONTEXT_TEMPLATE,
+    BRAINSTORM_PROMPT,
+    CHAT_HELP,
+    CHAT_HELP_SHORT,
+    CHAT_SYSTEM_PROMPT,
+    IMPLEMENT_CONTEXT_TEMPLATE,
+    IMPLEMENT_PROMPT,
+    MODE_CHANGED_TEMPLATE,
+    MODE_DESCRIPTIONS,
+    MODE_TIPS,
+    PLAN_TEMPLATE,
+    REVIEW_CONTEXT_TEMPLATE,
+    REVIEW_PROMPT,
+)
+from .query_expansion import (
+    ConversationContext,
+    ExpandedQuery,
+    QueryExpander,
+    UserIntent,
+)
 
 logger = get_logger("chat.engine")
 
@@ -20,6 +43,11 @@ class ChatEngine:
 
     Coordinates between user input, code context, and LLM
     to provide an interactive chat experience.
+
+    Supports three modes:
+    - brainstorm: Open-ended exploration
+    - implement: Task-focused implementation guidance
+    - review: Code review and quality analysis
     """
 
     # Maximum messages to include in LLM context
@@ -30,6 +58,7 @@ class ChatEngine:
         config: Config,
         include_context: bool = True,
         max_context_results: int = 3,
+        initial_mode: str = "brainstorm",
     ):
         """Initialize the chat engine.
 
@@ -37,15 +66,22 @@ class ChatEngine:
             config: CodeSage configuration
             include_context: Whether to include code context in prompts
             max_context_results: Maximum code snippets in context
+            initial_mode: Starting interaction mode
         """
         self.config = config
         self.include_context = include_context
         self.max_context_results = max_context_results
 
+        # Current interaction mode
+        self._mode = ChatMode.BRAINSTORM
+        if initial_mode in ("implement", "review"):
+            self._mode = ChatMode(initial_mode)
+
         # Lazy-loaded components
         self._llm: Optional[LLMProvider] = None
         self._context_builder: Optional[CodeContextBuilder] = None
         self._db: Optional[Database] = None
+        self._context_provider: Optional[ContextProvider] = None
 
         # Session management
         self._session = ChatSession(
@@ -56,8 +92,26 @@ class ChatEngine:
         # Command parser
         self._parser = CommandParser()
 
+        # Query expansion for better context understanding
+        self._query_expander = QueryExpander()
+        self._conversation_context = ConversationContext(current_mode=initial_mode)
+
+        # State for follow-up interactions
+        self._last_deep_result: Optional[Dict[str, Any]] = None
+        self._current_plan: Optional[Any] = None
+        self._last_review: Optional[Dict[str, Any]] = None
+
+        # Track discussed files and topics for context continuity
+        self._discussed_files: Set[str] = set()
+        self._discussed_topics: List[str] = []
+
         # Add system message
         self._session.add_message(ChatMessage.system(self._build_system_prompt()))
+
+    @property
+    def mode(self) -> ChatMode:
+        """Get current interaction mode."""
+        return self._mode
 
     @property
     def llm(self) -> LLMProvider:
@@ -74,6 +128,13 @@ class ChatEngine:
         return self._context_builder
 
     @property
+    def context_provider(self) -> ContextProvider:
+        """Lazy-load the context provider."""
+        if self._context_provider is None:
+            self._context_provider = ContextProvider(self.config)
+        return self._context_provider
+
+    @property
     def db(self) -> Database:
         """Lazy-load the database."""
         if self._db is None:
@@ -85,16 +146,75 @@ class ChatEngine:
         """Get the current chat session."""
         return self._session
 
+    def _get_commands_help(self) -> str:
+        """Get formatted commands help for prompts."""
+        return CHAT_HELP_SHORT
+
     def _build_system_prompt(self) -> str:
-        """Build the system prompt for the LLM.
+        """Build the system prompt for the LLM based on current mode.
 
         Returns:
             Formatted system prompt string
         """
-        return CHAT_SYSTEM_PROMPT.format(
-            project_name=self.config.project_name,
-            language=self.config.language,
-        )
+        commands_help = self._get_commands_help()
+
+        if self._mode == ChatMode.BRAINSTORM:
+            return BRAINSTORM_PROMPT.format(
+                project_name=self.config.project_name,
+                commands_help=commands_help,
+            )
+        elif self._mode == ChatMode.IMPLEMENT:
+            return IMPLEMENT_PROMPT.format(
+                project_name=self.config.project_name,
+                commands_help=commands_help,
+            )
+        elif self._mode == ChatMode.REVIEW:
+            return REVIEW_PROMPT.format(
+                project_name=self.config.project_name,
+                commands_help=commands_help,
+            )
+        else:
+            return CHAT_SYSTEM_PROMPT.format(
+                project_name=self.config.project_name,
+                language=self.config.language,
+                commands_help=commands_help,
+            )
+
+    def _format_mode_context(self, mode: str, **kwargs) -> str:
+        """Format context using mode-specific templates.
+
+        Args:
+            mode: The chat mode (brainstorm, implement, review)
+            **kwargs: Template variables
+
+        Returns:
+            Formatted context string
+        """
+        templates = {
+            "brainstorm": BRAINSTORM_CONTEXT_TEMPLATE,
+            "implement": IMPLEMENT_CONTEXT_TEMPLATE,
+            "review": REVIEW_CONTEXT_TEMPLATE,
+        }
+        template = templates.get(mode, BRAINSTORM_CONTEXT_TEMPLATE)
+        # Fill missing keys with empty strings
+        for key in [
+            "code_blocks",
+            "patterns",
+            "architecture_notes",
+            "cross_project_insights",
+            "implementation_steps",
+            "affected_files",
+            "dependencies",
+            "security_notes",
+            "test_suggestions",
+            "changes",
+            "static_findings",
+            "security_findings",
+            "pattern_deviations",
+            "conventions",
+        ]:
+            kwargs.setdefault(key, "")
+        return template.format(**kwargs)
 
     def process_input(self, user_input: str) -> Tuple[str, bool]:
         """Process user input and return response.
@@ -110,26 +230,32 @@ class ChatEngine:
         parsed = self._parser.parse(user_input)
 
         # Handle commands
-        if parsed.command == ChatCommand.EXIT:
-            return "Goodbye!", False
+        handlers = {
+            ChatCommand.EXIT: lambda _: ("Goodbye!", False),
+            ChatCommand.HELP: lambda _: (self._handle_help(), True),
+            ChatCommand.CLEAR: lambda _: (self._handle_clear(), True),
+            ChatCommand.STATS: lambda _: (self._handle_stats(), True),
+            ChatCommand.CONTEXT: lambda p: (self._handle_context(p.args), True),
+            ChatCommand.SEARCH: lambda p: (self._handle_search(p.args), True),
+            ChatCommand.UNKNOWN: lambda _: (
+                "Unknown command. Type /help for available commands.",
+                True,
+            ),
+            # Enhanced commands
+            ChatCommand.DEEP: lambda p: (self._handle_deep(p.args), True),
+            ChatCommand.PLAN: lambda p: (self._handle_plan(p.args), True),
+            ChatCommand.REVIEW: lambda p: (self._handle_review(p.args), True),
+            ChatCommand.SECURITY: lambda p: (self._handle_security(p.args), True),
+            ChatCommand.IMPACT: lambda p: (self._handle_impact(p.args), True),
+            ChatCommand.PATTERNS: lambda p: (self._handle_patterns(p.args), True),
+            ChatCommand.SIMILAR: lambda p: (self._handle_similar(p.args), True),
+            ChatCommand.MODE: lambda p: (self._handle_mode(p.args), True),
+            ChatCommand.EXPORT: lambda p: (self._handle_export(p.args), True),
+        }
 
-        if parsed.command == ChatCommand.HELP:
-            return self._handle_help(), True
-
-        if parsed.command == ChatCommand.CLEAR:
-            return self._handle_clear(), True
-
-        if parsed.command == ChatCommand.STATS:
-            return self._handle_stats(), True
-
-        if parsed.command == ChatCommand.CONTEXT:
-            return self._handle_context(parsed.args), True
-
-        if parsed.command == ChatCommand.SEARCH:
-            return self._handle_search(parsed.args), True
-
-        if parsed.command == ChatCommand.UNKNOWN:
-            return f"Unknown command. Type /help for available commands.", True
+        handler = handlers.get(parsed.command)
+        if handler:
+            return handler(parsed)
 
         # Regular message - process with LLM
         if parsed.command == ChatCommand.MESSAGE and parsed.args:
@@ -138,7 +264,7 @@ class ChatEngine:
         return "Please enter a message or command.", True
 
     def _process_message(self, message: str) -> str:
-        """Process a regular chat message.
+        """Process a regular chat message with query expansion.
 
         Args:
             message: User message text
@@ -146,23 +272,45 @@ class ChatEngine:
         Returns:
             Assistant response text
         """
-        # Add user message to session
-        user_msg = self._session.add_user_message(message)
+        # Update conversation context
+        self._conversation_context.add_query(message)
 
-        # Build context from codebase
+        # Expand query for better understanding
+        expanded = self._query_expander.expand(message, self._conversation_context)
+
+        # Check if query needs clarification
+        if expanded.is_ambiguous and expanded.confidence_score < 0.6:
+            clarification_msg = self._generate_clarification_prompt(expanded)
+            return clarification_msg
+
+        # Context provider mode: return structured guidance instead of LLM output
+        if self.config.features.context_provider_mode:
+            # Use expanded query for better context
+            context = self.context_provider.get_implementation_context(
+                expanded.enhanced_query
+            )
+            return self.context_provider.to_markdown(context)
+
+        # Add user message to session
+        self._session.add_user_message(message)
+
+        # Build context based on mode using EXPANDED query
         context = ""
         code_refs = []
         if self.include_context:
             try:
-                context = self.context_builder.build_context(
-                    message,
-                    limit=self.max_context_results,
+                # Use enhanced query for context retrieval
+                context = self._build_mode_context(expanded.enhanced_query)
+                code_refs = self.context_builder.get_code_refs(
+                    expanded.enhanced_query, limit=5
                 )
-                code_refs = self.context_builder.get_code_refs(message, limit=5)
+
+                # Track discussed files and topics
+                self._update_conversation_context(code_refs, expanded)
             except Exception as e:
                 logger.warning(f"Failed to build context: {e}")
 
-        # Build messages for LLM
+        # Build messages for LLM with expanded context awareness
         messages = self._build_llm_messages(context)
 
         # Call LLM
@@ -177,6 +325,109 @@ class ChatEngine:
 
         return response
 
+    def _generate_clarification_prompt(self, expanded: ExpandedQuery) -> str:
+        """Generate a prompt asking user for clarification.
+
+        Args:
+            expanded: Expanded query with ambiguity info
+
+        Returns:
+            Clarification prompt string
+        """
+        lines = [
+            "I'm not quite sure I understand what you're looking for. Could you clarify?",
+            "",
+        ]
+
+        if expanded.ambiguity_hints:
+            lines.append(
+                f"I noticed these potentially ambiguous terms: {', '.join(expanded.ambiguity_hints[:3])}"
+            )
+            lines.append("")
+
+        if expanded.suggested_clarifications:
+            lines.append("Did you mean:")
+            for i, suggestion in enumerate(expanded.suggested_clarifications[:4], 1):
+                lines.append(f"{i}. {suggestion}")
+            lines.append("")
+
+        lines.append(
+            "Or try being more specific, e.g., mention a file name, function, or add more context."
+        )
+
+        return "\n".join(lines)
+
+    def _update_conversation_context(
+        self, code_refs: List[Any], expanded: ExpandedQuery
+    ):
+        """Update conversation context with new information.
+
+        Args:
+            code_refs: Code references from search
+            expanded: Expanded query information
+        """
+        # Extract files from code references
+        files = []
+        topics = []
+
+        for ref in code_refs:
+            if hasattr(ref, "file"):
+                files.append(str(ref.file))
+            elif isinstance(ref, dict) and "file" in ref:
+                files.append(str(ref["file"]))
+
+            if hasattr(ref, "name") and ref.name:
+                topics.append(ref.name)
+            elif isinstance(ref, dict) and ref.get("name"):
+                topics.append(ref["name"])
+
+        # Add expanded terms as topics
+        if expanded.expanded_terms:
+            topics.extend(expanded.expanded_terms[:3])
+
+        # Add intent as topic
+        if expanded.intent != UserIntent.UNKNOWN:
+            topics.append(expanded.intent.name.lower())
+
+        # Update conversation context
+        self._conversation_context.add_discussion(files, topics)
+
+        # Update local tracking
+        self._discussed_files.update(files)
+        self._discussed_topics.extend(topics)
+        self._discussed_topics = self._discussed_topics[-20:]  # Keep last 20
+
+    def _build_mode_context(self, query: str) -> str:
+        """Build context appropriate for current mode.
+
+        Args:
+            query: User query
+
+        Returns:
+            Formatted context string
+        """
+        if self._mode == ChatMode.BRAINSTORM:
+            # Rich exploratory context
+            return self.context_builder.build_context(
+                query,
+                limit=self.max_context_results + 2,  # More context for exploration
+            )
+        elif self._mode == ChatMode.IMPLEMENT:
+            # Focused implementation context
+            impl_context = self.context_provider.get_implementation_context(query)
+            return self.context_provider.to_markdown(impl_context)
+        elif self._mode == ChatMode.REVIEW:
+            # Review-focused context (code + patterns)
+            return self.context_builder.build_context(
+                query,
+                limit=self.max_context_results,
+            )
+        else:
+            return self.context_builder.build_context(
+                query,
+                limit=self.max_context_results,
+            )
+
     def _build_llm_messages(self, context: str = "") -> List[Dict[str, str]]:
         """Build message list for LLM API.
 
@@ -188,18 +439,15 @@ class ChatEngine:
         """
         messages = []
 
-        # System message (always first, without context)
+        # System message (always first)
         messages.append({"role": "system", "content": self._build_system_prompt()})
 
         # Get conversation history (excluding system messages)
-        history = [
-            msg for msg in self._session.messages
-            if msg.role != "system"
-        ]
+        history = [msg for msg in self._session.messages if msg.role != "system"]
 
         # Limit history
         if len(history) > self.MAX_HISTORY_MESSAGES:
-            history = history[-self.MAX_HISTORY_MESSAGES:]
+            history = history[-self.MAX_HISTORY_MESSAGES :]
 
         # Add history messages
         for msg in history[:-1]:  # All except last user message
@@ -216,31 +464,25 @@ class ChatEngine:
 
         return messages
 
-    def _handle_help(self) -> str:
-        """Handle /help command.
+    # =========================================================================
+    # Core Command Handlers
+    # =========================================================================
 
-        Returns:
-            Help text
-        """
+    def _handle_help(self) -> str:
+        """Handle /help command."""
         return CHAT_HELP
 
     def _handle_clear(self) -> str:
-        """Handle /clear command.
-
-        Returns:
-            Confirmation message
-        """
-        # Keep only system message
+        """Handle /clear command."""
         self._session.clear_history()
         self._session.add_message(ChatMessage.system(self._build_system_prompt()))
+        self._last_deep_result = None
+        self._current_plan = None
+        self._last_review = None
         return "Conversation history cleared."
 
     def _handle_stats(self) -> str:
-        """Handle /stats command.
-
-        Returns:
-            Index statistics
-        """
+        """Handle /stats command."""
         try:
             stats = self.db.get_stats()
             return (
@@ -248,74 +490,931 @@ class ChatEngine:
                 f"- Files indexed: {stats['files']}\n"
                 f"- Code elements: {stats['elements']}\n"
                 f"- Last indexed: {stats['last_indexed'] or 'Never'}\n"
-                f"- Project: {self.config.project_name}"
+                f"- Project: {self.config.project_name}\n"
+                f"- Current mode: {self._mode.value}"
             )
         except Exception as e:
             return f"Could not get stats: {e}"
 
     def _handle_context(self, args: Optional[str]) -> str:
-        """Handle /context command.
+        """Handle /context command."""
+        if not args:
+            return (
+                f"**Context Settings**\n\n"
+                f"- Code context enabled: {self.include_context}\n"
+                f"- Max context results: {self.max_context_results}\n"
+                f"- Current mode: {self._mode.value}\n\n"
+                f"**Modify:** `/context code on|off` | `/context limit <n>`"
+            )
 
-        Args:
-            args: Optional arguments
+        parts = args.lower().split()
+        if len(parts) >= 2:
+            setting, value = parts[0], parts[1]
 
-        Returns:
-            Context information or settings update
-        """
-        if args:
-            # Could implement context settings here
-            return f"Context settings not yet implemented."
+            if setting == "code":
+                if value in ("on", "true", "yes", "1"):
+                    self.include_context = True
+                    return "Code context **enabled**."
+                elif value in ("off", "false", "no", "0"):
+                    self.include_context = False
+                    return "Code context **disabled**."
 
-        # Show current context settings
-        return (
-            f"**Context Settings**\n\n"
-            f"- Code context enabled: {self.include_context}\n"
-            f"- Max context results: {self.max_context_results}\n"
-            f"- Max context chars: {self.context_builder.MAX_CONTEXT_CHARS}"
-        )
+            elif setting == "limit":
+                try:
+                    limit = int(value)
+                    if 1 <= limit <= 20:
+                        self.max_context_results = limit
+                        return f"Context limit set to **{limit}**."
+                    else:
+                        return "Limit must be between 1 and 20."
+                except ValueError:
+                    return "Invalid number. Use: `/context limit <n>`"
+
+        return "Unknown setting. Use: `/context code on|off` or `/context limit <n>`"
 
     def _handle_search(self, query: Optional[str]) -> str:
-        """Handle /search command.
-
-        Args:
-            query: Search query
-
-        Returns:
-            Search results
-        """
+        """Handle /search command with query expansion."""
         if not query:
             return "Please provide a search query: /search <query>"
 
         try:
+            # Expand query for better search results
+            expanded = self._query_expander.expand(query, self._conversation_context)
+
+            # Log expansion
+            logger.info(
+                f"Search query expanded: '{query}' -> {len(expanded.expanded_terms)} terms"
+            )
+
+            # Perform multiple searches with expanded queries
+            all_results = []
+            seen_files = set()
+
+            # Search with original query
             results = self.context_builder.search_code(query, limit=5)
+            for r in results:
+                key = f"{r.get('file')}:{r.get('line')}"
+                if key not in seen_files:
+                    seen_files.add(key)
+                    all_results.append(r)
+
+            # Search with expanded terms if confidence is high
+            if expanded.confidence_score >= 0.5 and expanded.expanded_terms:
+                # Build expanded query from top terms
+                expanded_query = " ".join(expanded.expanded_terms[:5])
+                expanded_results = self.context_builder.search_code(
+                    expanded_query, limit=3
+                )
+                for r in expanded_results:
+                    key = f"{r.get('file')}:{r.get('line')}"
+                    if key not in seen_files:
+                        seen_files.add(key)
+                        all_results.append(r)
+
+            results = all_results[:8]  # Limit total results
         except Exception as e:
             return f"Search failed: {e}"
 
         if not results:
             return f"No results found for: {query}"
 
-        # Format results
-        output = [f"**Search Results for:** {query}\n"]
+        # Build output
+        output_lines = [f"**Search Results for:** {query}\n"]
+
+        # Show expansion info if helpful
+        if expanded.expanded_terms and len(expanded.expanded_terms) > 2:
+            output_lines.append(
+                f"*Expanded with: {', '.join(expanded.expanded_terms[:4])}*\n"
+            )
+
+        output_lines.append("")
 
         for i, r in enumerate(results, 1):
-            name_part = f" ({r['name']})" if r.get('name') else ""
-            output.append(
+            name_part = f" ({r['name']})" if r.get("name") else ""
+            output_lines.append(
                 f"\n**{i}. {r['file']}:{r['line']}**{name_part}\n"
                 f"Similarity: {r['similarity']:.0%} | Type: {r['type']}\n"
                 f"```{r['language']}\n{r['code'][:300]}{'...' if len(r['code']) > 300 else ''}\n```"
             )
 
-        return "\n".join(output)
+        return "\n".join(output_lines)
+
+    # =========================================================================
+    # Enhanced Command Handlers
+    # =========================================================================
+
+    def _handle_deep(self, query: Optional[str]) -> str:
+        """Handle /deep command for multi-agent analysis."""
+        if not query:
+            return "Please provide a query: /deep <query>"
+
+        try:
+            # Expand query for better context retrieval
+            expanded = self._query_expander.expand(query, self._conversation_context)
+
+            # Check confidence and ambiguity
+            if expanded.is_ambiguous and expanded.confidence_score < 0.6:
+                return self._generate_clarification_prompt(expanded)
+
+            # Log expansion for debugging
+            logger.info(
+                f"Query expanded: '{query}' -> intent={expanded.intent.name}, "
+                f"terms={len(expanded.expanded_terms)}, confidence={expanded.confidence_score:.2f}"
+            )
+
+            # Use EXPANDED query for context provider
+            context = self.context_provider.get_implementation_context(
+                expanded.enhanced_query,
+                include_cross_project=self.config.features.cross_project_recommendations,
+            )
+
+            # Store for follow-up
+            self._last_deep_result = {
+                "query": query,
+                "context": context,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+            # Build rich context for LLM
+            context_sections = []
+
+            # Add relevant code
+            if context.relevant_code:
+                context_sections.append("## Relevant Code Found\n")
+                for ref in context.relevant_code[:5]:
+                    snippet = (
+                        getattr(ref, "snippet", "")
+                        or getattr(ref, "content", "")
+                        or getattr(ref, "code", "")
+                    )
+                    context_sections.append(
+                        f"**{ref.name or ref.element_type}** in `{ref.file}:{ref.line}` "
+                        f"(relevance: {ref.similarity:.0%})\n"
+                    )
+                    if snippet:
+                        context_sections.append(
+                            f"```{self.config.language}\n{snippet[:300]}\n```\n"
+                        )
+
+            # Add patterns
+            if context.patterns:
+                context_sections.append("## Detected Patterns\n")
+                for p in context.patterns[:5]:
+                    name = p.get("name", "Unknown")
+                    desc = p.get("description", "")
+                    conf = p.get("confidence_score", p.get("confidence", 0))
+                    context_sections.append(
+                        f"- **{name}** (confidence: {conf:.0%}): {desc[:100]}\n"
+                    )
+
+            # Add implementation plan if available
+            if context.implementation_plan:
+                context_sections.append("## Implementation Insights\n")
+                if context.implementation_plan.steps:
+                    context_sections.append("Suggested approach:\n")
+                    for i, step in enumerate(context.implementation_plan.steps[:5], 1):
+                        context_sections.append(f"{i}. {step}\n")
+
+            # Add security considerations
+            if context.security:
+                if context.security.get("requirements"):
+                    context_sections.append("## Security Considerations\n")
+                    for req in context.security["requirements"][:3]:
+                        context_sections.append(f"- {req}\n")
+
+            # Add dependencies
+            if context.dependencies:
+                context_sections.append("## Related Dependencies\n")
+                for dep in context.dependencies[:5]:
+                    name = dep.get("name", "Unknown")
+                    rel_type = dep.get("rel_type", "related")
+                    context_sections.append(f"- {name} ({rel_type})\n")
+
+            # Build prompt for LLM to generate human-readable response
+            context_str = "\n".join(context_sections)
+            prompt = f"""You are CodeSage, a senior software architect analyzing a codebase inquiry.
+
+The user asked: "{query}"
+
+Here is the relevant context gathered from the codebase:
+
+{context_str}
+
+Please provide a thoughtful, conversational analysis that:
+1. Directly addresses the user's question
+2. Synthesizes the information naturally (don't just list bullet points)
+3. Highlights key insights and patterns discovered
+4. Suggests next steps or areas to explore
+5. References specific files/functions naturally in your explanation
+
+Write in a friendly, professional tone as if explaining to a colleague. Avoid rigid section headers unless they truly help organize complex information."""
+
+            # Call LLM for natural language generation
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful senior developer analyzing code.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            response = self.llm.chat(messages)
+
+            # Add follow-up suggestion
+            output = f"## Analysis: {query}\n\n{response}\n\n---\n*Ask follow-up questions or use /plan to create an implementation plan.*"
+            return output
+
+        except Exception as e:
+            logger.error(f"Deep analysis failed: {e}")
+            return f"Deep analysis failed: {e}"
+
+    def _handle_plan(self, task: Optional[str]) -> str:
+        """Handle /plan command for implementation planning."""
+        if not task:
+            return "Please provide a task: /plan <task description>"
+
+        try:
+            # Expand query for better context retrieval
+            expanded = self._query_expander.expand(task, self._conversation_context)
+
+            # Check confidence and ambiguity
+            if expanded.is_ambiguous and expanded.confidence_score < 0.6:
+                return self._generate_clarification_prompt(expanded)
+
+            # Log expansion for debugging
+            logger.info(
+                f"Plan query expanded: '{task}' -> intent={expanded.intent.name}, "
+                f"confidence={expanded.confidence_score:.2f}"
+            )
+
+            # Use EXPANDED query for context
+            context = self.context_provider.get_implementation_context(
+                expanded.enhanced_query
+            )
+            self._current_plan = context
+
+            # Build rich context for LLM
+            context_sections = [f"## Task: {task}\n"]
+
+            # Add relevant code
+            if context.relevant_code:
+                context_sections.append("### Relevant Code References\n")
+                for ref in context.relevant_code[:5]:
+                    context_sections.append(
+                        f"- **{ref.name or ref.element_type}** in `{ref.file}:{ref.line}` "
+                        f"(relevance: {ref.similarity:.0%})\n"
+                    )
+
+            # Add implementation steps
+            if context.implementation_plan and context.implementation_plan.steps:
+                context_sections.append("\n### Implementation Steps\n")
+                for i, step in enumerate(context.implementation_plan.steps, 1):
+                    context_sections.append(f"{i}. {step}\n")
+
+            # Add affected files
+            if context.suggested_files:
+                context_sections.append("\n### Affected Files\n")
+                for f in context.suggested_files[:10]:
+                    context_sections.append(f"- `{f}`\n")
+
+            # Add dependencies
+            if context.dependencies:
+                context_sections.append("\n### Dependencies\n")
+                for dep in context.dependencies[:5]:
+                    name = dep.get("name", "Unknown")
+                    rel_type = dep.get("rel_type", "related")
+                    context_sections.append(f"- {name} ({rel_type})\n")
+
+            # Add security considerations
+            if context.security:
+                if context.security.get("requirements"):
+                    context_sections.append("\n### Security Requirements\n")
+                    for req in context.security["requirements"]:
+                        context_sections.append(f"- {req}\n")
+                if context.security.get("test_suggestions"):
+                    context_sections.append("\n### Test Suggestions\n")
+                    for test in context.security["test_suggestions"][:5]:
+                        context_sections.append(f"- {test}\n")
+
+            # Build prompt for LLM
+            context_str = "".join(context_sections)
+            prompt = f"""You are CodeSage, an experienced pair programmer helping implement a feature.
+
+The user wants to: {task}
+
+Here's the context gathered from the codebase:
+
+{context_str}
+
+Please provide a clear, actionable implementation plan that:
+1. Starts with a brief overview of the approach
+2. Provides specific, step-by-step instructions that can be followed
+3. References exact files and functions when discussing changes
+4. Highlights potential gotchas or breaking changes
+5. Suggests testing strategies
+6. Maintains consistency with existing code patterns
+
+Write in a practical, developer-friendly tone. Be specific about what needs to change and where."""
+
+            # Call LLM for natural language generation
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful senior developer creating implementation plans.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            response = self.llm.chat(messages)
+
+            # Add refinement suggestions
+            output = f"## Implementation Plan: {task}\n\n{response}\n\n---\n*Refine this plan with: add <requirement> | focus <file> | security | approve*"
+            return output
+
+        except Exception as e:
+            logger.error(f"Planning failed: {e}")
+            return f"Planning failed: {e}"
+
+    def _handle_review(self, target: Optional[str]) -> str:
+        """Handle /review command for code review."""
+        try:
+            # If no target, review staged changes
+            review_target = target if target else "staged"
+
+            review_context = []
+            all_findings = []
+
+            # Run the hybrid analyzer if available
+            try:
+                from codesage.review.hybrid_analyzer import HybridReviewAnalyzer
+
+                analyzer = HybridReviewAnalyzer(self.config)
+
+                if review_target == "staged":
+                    result = analyzer.review_staged_changes()
+                else:
+                    result = analyzer.review_file(Path(review_target))
+
+                self._last_review = result
+
+                # Collect all findings for LLM analysis
+                if result.get("findings"):
+                    review_context.append(f"## Code Review: {review_target}\n")
+
+                    # Group findings by severity and type
+                    critical = []
+                    high = []
+                    medium = []
+                    low = []
+
+                    for finding in result["findings"]:
+                        finding_info = {
+                            "title": finding.get("title", "Issue"),
+                            "description": finding.get("description", ""),
+                            "file": finding.get("file"),
+                            "line": finding.get("line"),
+                            "severity": finding.get("severity", "info"),
+                            "type": finding.get("type", "static"),
+                        }
+                        all_findings.append(finding_info)
+
+                        severity = finding.get("severity", "info")
+                        if severity == "critical":
+                            critical.append(finding_info)
+                        elif severity == "high":
+                            high.append(finding_info)
+                        elif severity == "medium":
+                            medium.append(finding_info)
+                        else:
+                            low.append(finding_info)
+
+                    # Add findings to context
+                    if critical:
+                        review_context.append(
+                            f"### Critical Issues ({len(critical)})\n"
+                        )
+                        for f in critical[:5]:
+                            review_context.append(f"- **{f['title']}**")
+                            if f["file"]:
+                                review_context.append(
+                                    f"  Location: `{f['file']}:{f['line']}`"
+                                )
+                            if f["description"]:
+                                review_context.append(f"  {f['description'][:100]}\n")
+
+                    if high:
+                        review_context.append(f"\n### High Priority ({len(high)})\n")
+                        for f in high[:5]:
+                            review_context.append(f"- **{f['title']}**")
+                            if f["file"]:
+                                review_context.append(f"  `{f['file']}:{f['line']}`")
+
+                    if medium:
+                        review_context.append(
+                            f"\n### Medium Priority ({len(medium)})\n"
+                        )
+                        for f in medium[:3]:
+                            review_context.append(f"- {f['title']}")
+
+                    if low:
+                        review_context.append(
+                            f"\n### Low Priority ({len(low)} items)\n"
+                        )
+                else:
+                    review_context.append(
+                        f"## Code Review: {review_target}\n\nNo issues found! ✓\n"
+                    )
+
+                # Add summary if available
+                if result.get("summary"):
+                    review_context.append(f"\n### Summary\n{result['summary']}\n")
+
+            except ImportError:
+                review_context.append(
+                    "*HybridReviewAnalyzer not available*\nRun `codesage review` from CLI for full analysis.\n"
+                )
+
+            # Build prompt for LLM to generate human-readable review
+            context_str = "".join(review_context)
+            prompt = f"""You are CodeSage, a senior code reviewer providing feedback on code changes.
+
+Review target: {review_target}
+
+Here are the findings from automated analysis:
+
+{context_str}
+
+Please provide a constructive code review that:
+1. Starts with an overall assessment (approval, needs changes, or major concerns)
+2. Groups related issues logically (not by severity)
+3. Explains WHY each issue matters, not just what
+4. Provides specific, actionable suggestions for fixes
+5. Highlights any positive aspects or good patterns observed
+6. Prioritizes critical security and correctness issues
+
+Write in a helpful, professional tone. Be specific about file locations and line numbers."""
+
+            # Call LLM for natural language generation
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful senior developer performing code reviews.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            response = self.llm.chat(messages)
+            return response
+
+        except Exception as e:
+            logger.error(f"Review failed: {e}")
+            return f"Review failed: {e}"
+
+    def _handle_security(self, target: Optional[str]) -> str:
+        """Handle /security command for security analysis."""
+        try:
+            from codesage.security.scanner import SecurityScanner
+
+            scanner = SecurityScanner(self.config.security)
+
+            if target:
+                path = Path(target)
+                if path.exists():
+                    findings = scanner.scan_file(path)
+                else:
+                    return f"Path not found: {target}"
+            else:
+                findings = scanner.scan_directory(self.config.project_path)
+
+            # Build security context for LLM
+            security_context = []
+
+            if findings:
+                security_context.append(
+                    f"## Security Analysis: {target or 'Project'}\n"
+                )
+
+                # Group by severity
+                critical = [
+                    f for f in findings if getattr(f, "severity", "") == "critical"
+                ]
+                high = [f for f in findings if getattr(f, "severity", "") == "high"]
+                medium = [f for f in findings if getattr(f, "severity", "") == "medium"]
+                low = [f for f in findings if getattr(f, "severity", "") == "low"]
+
+                if critical:
+                    security_context.append(
+                        f"\n### Critical Issues ({len(critical)})\n"
+                    )
+                    for f in critical[:5]:
+                        rule_id = getattr(f, "rule_id", "Unknown")
+                        msg = getattr(f, "message", "")
+                        file_path = getattr(f, "file", "Unknown")
+                        line = getattr(f, "line", "")
+                        security_context.append(f"- **{rule_id}**: {msg[:100]}")
+                        security_context.append(f"  Location: `{file_path}:{line}`\n")
+
+                if high:
+                    security_context.append(
+                        f"\n### High Priority Issues ({len(high)})\n"
+                    )
+                    for f in high[:5]:
+                        rule_id = getattr(f, "rule_id", "Unknown")
+                        msg = getattr(f, "message", "")
+                        file_path = getattr(f, "file", "Unknown")
+                        security_context.append(f"- **{rule_id}**: {msg[:80]}")
+                        security_context.append(
+                            f"  `{file_path}:{getattr(f, 'line', '')}`\n"
+                        )
+
+                if medium:
+                    security_context.append(
+                        f"\n### Medium Priority Issues ({len(medium)})\n"
+                    )
+                    for f in medium[:3]:
+                        rule_id = getattr(f, "rule_id", "Unknown")
+                        msg = getattr(f, "message", "")
+                        security_context.append(f"- {rule_id}: {msg[:60]}\n")
+
+                if low:
+                    security_context.append(
+                        f"\n### Low Priority ({len(low)} findings)\n"
+                    )
+
+                security_context.append(f"\n**Total findings: {len(findings)}**\n")
+            else:
+                security_context.append(
+                    f"## Security Analysis: {target or 'Project'}\n\nNo security issues found! ✓\n"
+                )
+
+            # Build prompt for LLM
+            context_str = "".join(security_context)
+            prompt = f"""You are CodeSage, a security engineer reviewing code for vulnerabilities.
+
+Target: {target or "Project-wide scan"}
+
+Security scan results:
+
+{context_str}
+
+Please provide a security assessment that:
+1. Gives an overall security posture summary
+2. Prioritizes critical and high-severity issues with specific remediation steps
+3. Explains the business/technical impact of each vulnerability
+4. Groups related security concerns (e.g., all input validation issues together)
+5. Provides code examples or specific fixes where possible
+6. Suggests preventive measures for future development
+
+Write in a clear, actionable tone. Focus on practical remediation."""
+
+            # Call LLM for natural language generation
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful security engineer analyzing code vulnerabilities.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            response = self.llm.chat(messages)
+            return response
+
+        except ImportError:
+            return "Security scanner not available. Run `codesage review` from CLI for full analysis."
+        except Exception as e:
+            logger.error(f"Security scan failed: {e}")
+            return f"Security scan failed: {e}"
+
+    def _handle_impact(self, element: Optional[str]) -> str:
+        """Handle /impact command for blast radius analysis."""
+        if not element:
+            return "Please provide an element: /impact <function or class name>"
+
+        try:
+            # Search for the element
+            results = self.context_builder.search_code(element, limit=1)
+            if not results:
+                return f"Element not found: {element}"
+
+            # Build impact context
+            impact_context = []
+            element_info = results[0]
+            element_name = element_info.get("name", element)
+            element_file = element_info.get("file", "Unknown")
+            element_line = element_info.get("line", "")
+
+            impact_context.append(f"## Impact Analysis: {element_name}\n")
+            impact_context.append(f"**Location:** `{element_file}:{element_line}`\n")
+
+            # Get graph context if available
+            try:
+                from codesage.storage.manager import StorageManager
+
+                storage = StorageManager(self.config)
+                if storage.graph_store:
+                    element_id = element_info.get("id", element)
+
+                    # Get dependents (what depends on this)
+                    dependents = storage.graph_store.get_dependents(element_id)
+                    callers = storage.graph_store.get_callers(element_id)
+
+                    # Collect callers information
+                    if callers:
+                        impact_context.append(
+                            f"\n### Direct Callers ({len(callers)})\n"
+                        )
+                        for c in callers[:10]:
+                            caller_name = c.get("name", "Unknown")
+                            caller_file = c.get("file", "")
+                            impact_context.append(
+                                f"- `{caller_name}` in `{caller_file}`\n"
+                            )
+                        if len(callers) > 10:
+                            impact_context.append(
+                                f"- *...and {len(callers) - 10} more*\n"
+                            )
+
+                    # Collect dependents information
+                    if dependents:
+                        impact_context.append(f"\n### Dependents ({len(dependents)})\n")
+                        for d in dependents[:10]:
+                            dep_name = d.get("name", "Unknown")
+                            dep_type = d.get("rel_type", "related")
+                            impact_context.append(f"- `{dep_name}` ({dep_type})\n")
+                        if len(dependents) > 10:
+                            impact_context.append(
+                                f"- *...and {len(dependents) - 10} more*\n"
+                            )
+
+                    # Calculate impact metrics
+                    impact_score = len(callers) + len(dependents)
+                    impact_context.append(f"\n### Impact Metrics\n")
+                    impact_context.append(f"- Total callers: {len(callers)}\n")
+                    impact_context.append(f"- Total dependents: {len(dependents)}\n")
+                    impact_context.append(f"- Combined impact score: {impact_score}\n")
+                else:
+                    impact_context.append(
+                        "\n*Graph store not available. Run `codesage index` for full analysis.*\n"
+                    )
+
+            except Exception as e:
+                impact_context.append(
+                    f"\n*Could not analyze full dependency graph: {e}*\n"
+                )
+
+            # Build prompt for LLM
+            context_str = "".join(impact_context)
+            prompt = f"""You are CodeSage, a software architect analyzing the impact of changes to a code element.
+
+{context_str}
+
+Please provide an impact analysis that:
+1. Summarizes the element's role in the codebase
+2. Identifies the main categories of code that depend on it
+3. Assesses the risk level of modifying this element (Low/Medium/High)
+4. Suggests strategies for safe refactoring if needed
+5. Highlights any potential breaking changes
+6. Recommends testing approaches for changes to this element
+
+Write in a clear, actionable tone suitable for developers planning changes."""
+
+            # Call LLM for natural language generation
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful software architect analyzing code dependencies.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            response = self.llm.chat(messages)
+            return response
+
+        except Exception as e:
+            logger.error(f"Impact analysis failed: {e}")
+            return f"Impact analysis failed: {e}"
+
+    def _handle_patterns(self, query: Optional[str]) -> str:
+        """Handle /patterns command to show learned patterns."""
+        try:
+            from codesage.memory.memory_manager import MemoryManager
+
+            memory = MemoryManager(global_dir=self.config.memory.global_dir)
+
+            # Get patterns
+            if query:
+                patterns = memory.find_similar_patterns(query, limit=10)
+            else:
+                patterns = memory.preference_store.get_patterns(limit=10)
+
+            if not patterns:
+                return "No patterns learned yet. Keep using CodeSage!"
+
+            # Build patterns context for LLM
+            patterns_context = []
+            patterns_context.append(f"## Code Patterns in {self.config.project_name}\n")
+
+            if query:
+                patterns_context.append(f"*Showing patterns related to: {query}*\n\n")
+
+            patterns_context.append(f"Found {len(patterns)} patterns:\n\n")
+
+            for i, p in enumerate(patterns[:10], 1):
+                if hasattr(p, "name"):
+                    name = p.name
+                    conf = getattr(p, "confidence_score", 0)
+                    desc = getattr(p, "description", "")
+                    patterns_context.append(
+                        f"**{i}. {name}** (confidence: {conf:.0%})\n"
+                    )
+                    if desc:
+                        patterns_context.append(f"   {desc[:120]}\n")
+                elif isinstance(p, dict):
+                    name = p.get("name", "Unknown")
+                    patterns_context.append(f"**{i}. {name}**\n")
+                    if p.get("description"):
+                        patterns_context.append(f"   {p['description'][:120]}\n")
+                patterns_context.append("")
+
+            # Build prompt for LLM
+            context_str = "".join(patterns_context)
+            prompt = f"""You are CodeSage, analyzing coding patterns detected in a codebase.
+
+{context_str}
+
+Please provide an analysis that:
+1. Summarizes the key patterns observed in this codebase
+2. Groups related patterns into categories (e.g., error handling, data access, architecture)
+3. Explains what these patterns reveal about the codebase's design philosophy
+4. Highlights any notable or unique patterns
+5. Suggests how developers should follow these patterns in new code
+6. Notes any patterns that might be candidates for standardization or improvement
+
+Write in an informative tone that helps developers understand and adopt these patterns."""
+
+            # Call LLM for natural language generation
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful developer analyzing code patterns and conventions.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            response = self.llm.chat(messages)
+            return response
+
+        except Exception as e:
+            logger.warning(f"Could not load patterns: {e}")
+            return f"Could not load patterns: {e}"
+
+    def _handle_similar(self, element: Optional[str]) -> str:
+        """Handle /similar command to find similar code."""
+        if not element:
+            return "Please provide an element: /similar <function or class name>"
+
+        try:
+            results = self.context_builder.search_code(element, limit=10)
+
+            if not results:
+                return f"No matches found for: {element}"
+
+            # Skip first if it's exact match
+            similar = results[1:] if results[0].get("similarity", 0) > 0.95 else results
+
+            if not similar:
+                return f"No similar code found to: {element}"
+
+            # Build similar code context for LLM
+            similar_context = []
+            similar_context.append(f"## Code Similar to: {element}\n")
+
+            # Get reference element info
+            ref_element = results[0]
+            similar_context.append(
+                f"**Reference:** `{ref_element.get('name', element)}` at `{ref_element['file']}:{ref_element['line']}`\n"
+            )
+            similar_context.append(
+                f"**Type:** {ref_element.get('type', 'Unknown')}\n\n"
+            )
+            similar_context.append(f"Found {len(similar)} similar code elements:\n\n")
+
+            for i, r in enumerate(similar[:5], 1):
+                name = r.get("name", "Unknown")
+                file_path = r["file"]
+                line = r["line"]
+                similarity = r["similarity"]
+                element_type = r.get("type", "Unknown")
+
+                similar_context.append(f"**{i}. {name}** - {similarity:.0%} similar\n")
+                similar_context.append(f"   Location: `{file_path}:{line}`\n")
+                similar_context.append(f"   Type: {element_type}\n\n")
+
+            if len(similar) > 5:
+                similar_context.append(
+                    f"*...and {len(similar) - 5} more similar elements*\n"
+                )
+
+            # Build prompt for LLM
+            context_str = "".join(similar_context)
+            prompt = f"""You are CodeSage, analyzing similar code elements to help with refactoring or standardization.
+
+{context_str}
+
+Please provide an analysis that:
+1. Summarizes what these similar elements have in common
+2. Identifies if they represent duplicated logic or different use cases
+3. Suggests opportunities for code consolidation or abstraction
+4. Highlights any variations that might indicate inconsistent implementation
+5. Recommends whether to keep them separate or unify them
+6. Suggests next steps for the developer
+
+Write in a practical, developer-friendly tone focused on code quality and maintainability."""
+
+            # Call LLM for natural language generation
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful developer analyzing code similarities for refactoring opportunities.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            response = self.llm.chat(messages)
+            return response
+
+        except Exception as e:
+            logger.error(f"Similar search failed: {e}")
+            return f"Search failed: {e}"
+
+    def _handle_mode(self, mode_arg: Optional[str]) -> str:
+        """Handle /mode command to switch interaction mode."""
+        if not mode_arg:
+            return (
+                f"**Current mode:** {self._mode.value}\n\n"
+                f"Switch with: `/mode brainstorm|implement|review`\n\n"
+                f"- **brainstorm**: Open-ended exploration\n"
+                f"- **implement**: Task-focused guidance\n"
+                f"- **review**: Code review focus"
+            )
+
+        mode_str = mode_arg.lower().strip()
+        valid_modes = {"brainstorm", "implement", "review"}
+
+        if mode_str not in valid_modes:
+            return f"Invalid mode. Choose: {', '.join(valid_modes)}"
+
+        old_mode = self._mode
+        self._mode = ChatMode(mode_str)
+
+        # Update system prompt
+        self._session.messages = [
+            msg for msg in self._session.messages if msg.role != "system"
+        ]
+        self._session.add_message(ChatMessage.system(self._build_system_prompt()))
+
+        return MODE_CHANGED_TEMPLATE.format(
+            mode=mode_str,
+            mode_description=MODE_DESCRIPTIONS.get(mode_str, ""),
+            mode_tips=MODE_TIPS.get(mode_str, ""),
+        )
+
+    def _handle_export(self, filename: Optional[str]) -> str:
+        """Handle /export command to save conversation."""
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"chat_export_{timestamp}.md"
+
+        try:
+            output_path = self.config.project_path / filename
+
+            lines = [
+                f"# Chat Export - {self.config.project_name}",
+                f"*Exported: {datetime.now().isoformat()}*",
+                f"*Mode: {self._mode.value}*",
+                "",
+                "---",
+                "",
+            ]
+
+            for msg in self._session.messages:
+                if msg.role == "system":
+                    continue
+                role_label = "**You:**" if msg.role == "user" else "**CodeSage:**"
+                lines.append(f"{role_label}\n{msg.content}\n")
+
+            output_path.write_text("\n".join(lines))
+            return f"Conversation exported to: `{output_path}`"
+
+        except Exception as e:
+            return f"Export failed: {e}"
 
     def get_session_info(self) -> Dict[str, Any]:
-        """Get information about the current session.
-
-        Returns:
-            Session information dictionary
-        """
+        """Get information about the current session."""
         return {
             "session_id": self._session.session_id,
             "message_count": self._session.message_count,
             "project": self.config.project_name,
             "context_enabled": self.include_context,
+            "mode": self._mode.value,
         }

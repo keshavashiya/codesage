@@ -98,10 +98,14 @@ class HybridReviewAnalyzer:
             from codesage.storage.manager import StorageManager
             from codesage.llm.embeddings import EmbeddingService
 
-            embedder = EmbeddingService(self.config.llm, self.config.cache_dir)
+            embedder = EmbeddingService(
+                self.config.llm,
+                self.config.cache_dir,
+                self.config.performance,
+            )
             self._storage_manager = StorageManager(
                 config=self.config,
-                embedding_fn=embedder.embedder,
+                embedding_fn=embedder,
             )
         return self._storage_manager
 

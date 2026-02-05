@@ -88,6 +88,42 @@ class MemoryConfig:
 
 
 @dataclass
+class PerformanceConfig:
+    """Performance tuning configuration."""
+
+    embedding_batch_size: int = 200  # Files per embedding batch
+    max_elements_per_batch: int = 200  # Cap to avoid OOM
+    embedding_cache_size: int = 1000  # In-memory LRU size for query embeddings
+    cache_enabled: bool = True  # Toggle disk + memory embedding caches
+
+
+@dataclass
+class FeaturesConfig:
+    """Feature flags for experimental capabilities."""
+
+    # Core features
+    embeddings: bool = True  # Local embeddings for semantic search
+    memory: bool = True  # Developer memory and pattern learning
+    llm_explanations: bool = True  # LLM-powered explanations
+    graph_storage: bool = True  # Graph-based code relationships
+
+    # Advanced features
+    context_provider_mode: bool = False
+    graph_enriched_search: bool = False
+    code_smell_detection: bool = False
+    docs_generation: bool = False
+    cross_project_recommendations: bool = False
+
+
+@dataclass
+class DocsConfig:
+    """Documentation generation configuration."""
+
+    output_dir: str = "docs"
+    format: str = "markdown"
+
+
+@dataclass
 class Config:
     """CodeSage configuration."""
 
@@ -99,6 +135,9 @@ class Config:
     security: SecurityConfig = field(default_factory=SecurityConfig)
     hooks: HooksConfig = field(default_factory=HooksConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
+    docs: DocsConfig = field(default_factory=DocsConfig)
     exclude_dirs: List[str] = field(default_factory=lambda: [
         # Version control
         ".git", ".svn", ".hg",
@@ -194,6 +233,9 @@ class Config:
         security_data = data.pop("security", {})
         hooks_data = data.pop("hooks", {})
         memory_data = data.pop("memory", {})
+        performance_data = data.pop("performance", {})
+        features_data = data.pop("features", {})
+        docs_data = data.pop("docs", {})
 
         return cls(
             project_path=project_path,
@@ -202,6 +244,9 @@ class Config:
             security=SecurityConfig(**security_data),
             hooks=HooksConfig(**hooks_data),
             memory=MemoryConfig(**memory_data),
+            performance=PerformanceConfig(**performance_data),
+            features=FeaturesConfig(**features_data),
+            docs=DocsConfig(**docs_data),
             **data
         )
 
@@ -254,6 +299,23 @@ class Config:
                 "learn_on_index": self.memory.learn_on_index,
                 "min_pattern_confidence": self.memory.min_pattern_confidence,
                 "min_pattern_occurrences": self.memory.min_pattern_occurrences,
+            },
+            "performance": {
+                "embedding_batch_size": self.performance.embedding_batch_size,
+                "max_elements_per_batch": self.performance.max_elements_per_batch,
+                "embedding_cache_size": self.performance.embedding_cache_size,
+                "cache_enabled": self.performance.cache_enabled,
+            },
+            "features": {
+                "context_provider_mode": self.features.context_provider_mode,
+                "graph_enriched_search": self.features.graph_enriched_search,
+                "code_smell_detection": self.features.code_smell_detection,
+                "docs_generation": self.features.docs_generation,
+                "cross_project_recommendations": self.features.cross_project_recommendations,
+            },
+            "docs": {
+                "output_dir": self.docs.output_dir,
+                "format": self.docs.format,
             },
         }
 

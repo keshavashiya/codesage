@@ -12,6 +12,8 @@ build/
 dist/
 *.egg-info/
 .eggs/
+.test-venv/
+.agent/
 
 # IDE
 .vscode/

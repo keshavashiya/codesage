@@ -556,9 +556,13 @@ def learn(
     console.print(f"Found {len(elements)} code elements")
 
     # Initialize memory hooks with embeddings
-    embedder = EmbeddingService(config.llm, config.cache_dir)
+    embedder = EmbeddingService(
+        config.llm,
+        config.cache_dir,
+        config.performance,
+    )
     hooks = MemoryHooks(
-        embedding_fn=embedder.embedder,
+        embedding_fn=embedder.embed_batch,
         enabled=True,
     )
 

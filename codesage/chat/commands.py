@@ -2,12 +2,13 @@
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Tuple
+from typing import Optional
 
 
 class ChatCommand(Enum):
     """Available chat commands."""
 
+    # Core commands
     HELP = auto()
     SEARCH = auto()
     CONTEXT = auto()
@@ -17,9 +18,30 @@ class ChatCommand(Enum):
     MESSAGE = auto()  # Regular message (not a command)
     UNKNOWN = auto()  # Unknown command
 
+    # Enhanced commands (Phase 1)
+    DEEP = auto()       # Deep multi-agent analysis
+    PLAN = auto()       # Implementation planning
+    REVIEW = auto()     # Code review
+    SECURITY = auto()   # Security analysis
+    IMPACT = auto()     # Impact/blast radius analysis
+    PATTERNS = auto()   # Show learned patterns
+    SIMILAR = auto()    # Find similar code
+    MODE = auto()       # Switch interaction mode
+    EXPORT = auto()     # Export conversation
 
-# Command mapping
+
+# Interaction modes
+class ChatMode(Enum):
+    """Chat interaction modes."""
+
+    BRAINSTORM = "brainstorm"   # Open-ended exploration
+    IMPLEMENT = "implement"     # Task-focused implementation
+    REVIEW = "review"           # Change review focus
+
+
+# Command mapping with aliases
 COMMAND_MAP = {
+    # Core commands
     "/help": ChatCommand.HELP,
     "/h": ChatCommand.HELP,
     "/?": ChatCommand.HELP,
@@ -35,6 +57,28 @@ COMMAND_MAP = {
     "/exit": ChatCommand.EXIT,
     "/quit": ChatCommand.EXIT,
     "/q": ChatCommand.EXIT,
+
+    # Enhanced commands
+    "/deep": ChatCommand.DEEP,
+    "/d": ChatCommand.DEEP,
+    "/analyze": ChatCommand.DEEP,
+    "/plan": ChatCommand.PLAN,
+    "/p": ChatCommand.PLAN,
+    "/implement": ChatCommand.PLAN,
+    "/review": ChatCommand.REVIEW,
+    "/r": ChatCommand.REVIEW,
+    "/security": ChatCommand.SECURITY,
+    "/sec": ChatCommand.SECURITY,
+    "/impact": ChatCommand.IMPACT,
+    "/blast": ChatCommand.IMPACT,
+    "/patterns": ChatCommand.PATTERNS,
+    "/pat": ChatCommand.PATTERNS,
+    "/similar": ChatCommand.SIMILAR,
+    "/sim": ChatCommand.SIMILAR,
+    "/mode": ChatCommand.MODE,
+    "/m": ChatCommand.MODE,
+    "/export": ChatCommand.EXPORT,
+    "/save": ChatCommand.EXPORT,
 }
 
 
@@ -113,12 +157,24 @@ class CommandParser:
             Help text string
         """
         help_texts = {
+            # Core commands
             ChatCommand.HELP: "Show available commands and usage",
             ChatCommand.SEARCH: "Search codebase: /search <query>",
             ChatCommand.CONTEXT: "Show current code context settings",
             ChatCommand.CLEAR: "Clear conversation history",
             ChatCommand.STATS: "Show index statistics",
             ChatCommand.EXIT: "Exit chat mode",
+
+            # Enhanced commands
+            ChatCommand.DEEP: "Deep multi-agent analysis: /deep <query>",
+            ChatCommand.PLAN: "Generate implementation plan: /plan <task>",
+            ChatCommand.REVIEW: "Review code changes: /review [file]",
+            ChatCommand.SECURITY: "Security analysis: /security [path]",
+            ChatCommand.IMPACT: "Impact analysis: /impact <element>",
+            ChatCommand.PATTERNS: "Show learned patterns: /patterns [query]",
+            ChatCommand.SIMILAR: "Find similar code: /similar <element>",
+            ChatCommand.MODE: "Switch mode: /mode <brainstorm|implement|review>",
+            ChatCommand.EXPORT: "Export conversation: /export [file]",
         }
         return help_texts.get(command, "Unknown command")
 
@@ -131,9 +187,47 @@ class CommandParser:
         seen = set()
         commands = []
 
-        for cmd_str, cmd_type in COMMAND_MAP.items():
-            if cmd_type not in seen and cmd_type != ChatCommand.UNKNOWN:
+        # Order matters for display - show primary aliases first
+        primary_aliases = [
+            "/help", "/search", "/deep", "/plan", "/review",
+            "/security", "/impact", "/patterns", "/similar",
+            "/mode", "/stats", "/context", "/export", "/clear", "/exit",
+        ]
+
+        for cmd_str in primary_aliases:
+            cmd_type = COMMAND_MAP.get(cmd_str)
+            if cmd_type and cmd_type not in seen:
                 seen.add(cmd_type)
                 commands.append((cmd_str, self.get_command_help(cmd_type)))
 
         return commands
+
+    def get_commands_by_category(self) -> dict:
+        """Get commands organized by category.
+
+        Returns:
+            Dictionary with category -> list of (command, description) tuples
+        """
+        return {
+            "Search & Analysis": [
+                ("/search <query>", "Semantic code search"),
+                ("/deep <query>", "Deep multi-agent analysis"),
+                ("/similar <element>", "Find similar code"),
+                ("/patterns [query]", "Show learned patterns"),
+            ],
+            "Planning & Review": [
+                ("/plan <task>", "Generate implementation plan"),
+                ("/review [file]", "Review code changes"),
+                ("/security [path]", "Security analysis"),
+                ("/impact <element>", "Impact/blast radius analysis"),
+            ],
+            "Session": [
+                ("/mode <mode>", "Switch mode (brainstorm/implement/review)"),
+                ("/context", "Show context settings"),
+                ("/stats", "Show index statistics"),
+                ("/export [file]", "Export conversation"),
+                ("/clear", "Clear history"),
+                ("/help", "Show this help"),
+                ("/exit", "Exit chat"),
+            ],
+        }

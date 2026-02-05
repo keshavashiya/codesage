@@ -388,6 +388,85 @@ class KuzuGraphStore:
         )
         return self._result_to_list(result)
 
+    def get_dependencies(self, node_id: str) -> List[Dict[str, Any]]:
+        """Get nodes this node depends on (calls, imports, inherits, uses).
+
+        Args:
+            node_id: ID of the source node.
+
+        Returns:
+            List of dependency nodes with relationship type.
+        """
+        # Use UNION ALL queries for KuzuDB 0.11.3+ compatibility (type(r) not supported)
+        result = self._conn.execute(
+            """
+            MATCH (source:CodeNode {id: $id})-[:CALLS]->(t:CodeNode)
+            RETURN t.id AS id, t.name AS name, t.file AS file, "CALLS" AS rel_type
+            UNION ALL
+            MATCH (source:CodeNode {id: $id})-[:IMPORTS]->(t:CodeNode)
+            RETURN t.id AS id, t.name AS name, t.file AS file, "IMPORTS" AS rel_type
+            UNION ALL
+            MATCH (source:CodeNode {id: $id})-[:INHERITS]->(t:CodeNode)
+            RETURN t.id AS id, t.name AS name, t.file AS file, "INHERITS" AS rel_type
+            UNION ALL
+            MATCH (source:CodeNode {id: $id})-[:USES]->(t:CodeNode)
+            RETURN t.id AS id, t.name AS name, t.file AS file, "USES" AS rel_type
+            """,
+            {"id": node_id},
+        )
+        return self._result_to_list(result)
+
+    def get_dependents(self, node_id: str) -> List[Dict[str, Any]]:
+        """Get nodes that depend on this node.
+
+        Args:
+            node_id: ID of the target node.
+
+        Returns:
+            List of dependent nodes with relationship type.
+        """
+        # Use UNION ALL queries for KuzuDB 0.11.3+ compatibility (type(r) not supported)
+        result = self._conn.execute(
+            """
+            MATCH (s:CodeNode)-[:CALLS]->(target:CodeNode {id: $id})
+            RETURN s.id AS id, s.name AS name, s.file AS file, "CALLS" AS rel_type
+            UNION ALL
+            MATCH (s:CodeNode)-[:IMPORTS]->(target:CodeNode {id: $id})
+            RETURN s.id AS id, s.name AS name, s.file AS file, "IMPORTS" AS rel_type
+            UNION ALL
+            MATCH (s:CodeNode)-[:INHERITS]->(target:CodeNode {id: $id})
+            RETURN s.id AS id, s.name AS name, s.file AS file, "INHERITS" AS rel_type
+            UNION ALL
+            MATCH (s:CodeNode)-[:USES]->(target:CodeNode {id: $id})
+            RETURN s.id AS id, s.name AS name, s.file AS file, "USES" AS rel_type
+            """,
+            {"id": node_id},
+        )
+        return self._result_to_list(result)
+
+    def get_transitive_callers(
+        self,
+        node_id: str,
+        max_depth: int = 2,
+    ) -> List[Dict[str, Any]]:
+        """Get transitive callers up to a max depth.
+
+        Args:
+            node_id: ID of the target node.
+            max_depth: Maximum traversal depth.
+
+        Returns:
+            List of caller nodes.
+        """
+        result = self._conn.execute(
+            """
+            MATCH (caller:CodeNode)-[:CALLS*1..$depth]->(target:CodeNode {id: $id})
+            RETURN DISTINCT caller.id AS id, caller.name AS name, caller.file AS file
+            """,
+            {"id": node_id, "depth": max_depth},
+        )
+        return self._result_to_list(result)
+
     def get_file_contents(self, file_id: str) -> List[Dict[str, Any]]:
         """Get all code elements contained in a file.
 

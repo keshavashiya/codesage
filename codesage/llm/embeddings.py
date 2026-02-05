@@ -6,11 +6,12 @@ from typing import List, Optional
 from pathlib import Path
 import hashlib
 import json
+from collections import OrderedDict
 
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.embeddings import Embeddings
 
-from codesage.utils.config import Config, LLMConfig
+from codesage.utils.config import Config, LLMConfig, PerformanceConfig
 from codesage.utils.retry import retry_with_backoff
 from codesage.utils.logging import get_logger
 
@@ -40,18 +41,29 @@ class EmbeddingService:
     # We use a conservative limit that works for most models
     MAX_CHARS = 1500
 
-    def __init__(self, config: LLMConfig, cache_dir: Path):
+    def __init__(
+        self,
+        config: LLMConfig,
+        cache_dir: Path,
+        performance: Optional[PerformanceConfig] = None,
+    ):
         """Initialize the embedding service.
 
         Args:
             config: LLM configuration
             cache_dir: Directory for embedding cache
+            performance: Optional performance configuration
         """
         self.config = config
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.performance = performance or PerformanceConfig()
+        self._cache_enabled = bool(self.performance.cache_enabled)
 
         self._embedder: Embeddings = self._init_embedder()
+        self._memory_cache: Optional[_EmbeddingLRU] = None
+        if self._cache_enabled and self.performance.embedding_cache_size > 0:
+            self._memory_cache = _EmbeddingLRU(self.performance.embedding_cache_size)
 
         # Create retry decorator based on config
         self._retry = retry_with_backoff(
@@ -129,10 +141,18 @@ class EmbeddingService:
         # Truncate if needed
         text = self._truncate(text)
 
+        use_cache = use_cache and self._cache_enabled
+
         if use_cache:
             cache_key = self._hash(text)
+            if self._memory_cache:
+                cached_mem = self._memory_cache.get(cache_key)
+                if cached_mem is not None:
+                    return cached_mem
             cached = self._get_from_cache(cache_key)
             if cached is not None:
+                if self._memory_cache:
+                    self._memory_cache.set(cache_key, cached)
                 return cached
 
         # Generate embedding with retry
@@ -152,6 +172,8 @@ class EmbeddingService:
 
         if use_cache:
             self._save_to_cache(cache_key, embedding)
+            if self._memory_cache:
+                self._memory_cache.set(cache_key, embedding)
 
         return embedding
 
@@ -171,6 +193,12 @@ class EmbeddingService:
         """
         # Truncate all texts first
         texts = [self._truncate(text) for text in texts]
+
+        use_cache = use_cache and self._cache_enabled
+
+        if len(texts) == 1:
+            # Route through single-embed path for query caching
+            return [self.embed(texts[0], use_cache=use_cache)]
 
         if not use_cache:
             @self._retry
@@ -261,4 +289,26 @@ def create_embedding_service(config: Config) -> EmbeddingService:
     Returns:
         Configured embedding service
     """
-    return EmbeddingService(config.llm, config.cache_dir)
+    return EmbeddingService(config.llm, config.cache_dir, config.performance)
+
+
+class _EmbeddingLRU:
+    """Simple LRU cache for embeddings."""
+
+    def __init__(self, max_size: int) -> None:
+        self.max_size = max_size
+        self._data: "OrderedDict[str, List[float]]" = OrderedDict()
+
+    def get(self, key: str) -> Optional[List[float]]:
+        if key not in self._data:
+            return None
+        self._data.move_to_end(key)
+        return self._data[key]
+
+    def set(self, key: str, value: List[float]) -> None:
+        if self.max_size <= 0:
+            return
+        self._data[key] = value
+        self._data.move_to_end(key)
+        if len(self._data) > self.max_size:
+            self._data.popitem(last=False)

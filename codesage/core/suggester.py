@@ -31,12 +31,16 @@ class Suggester:
         self.config = config
 
         # Initialize embedding service
-        self.embedder = EmbeddingService(config.llm, config.cache_dir)
+        self.embedder = EmbeddingService(
+            config.llm,
+            config.cache_dir,
+            config.performance,
+        )
 
         # Initialize unified storage manager (uses LanceDB for vectors)
         self.storage = StorageManager(
             config=config,
-            embedding_fn=self.embedder.embedder,
+            embedding_fn=self.embedder,
         )
 
         # Legacy compatibility
@@ -52,11 +56,11 @@ class Suggester:
         if config.memory.enabled:
             self._memory_manager = MemoryManager(
                 global_dir=config.memory.global_dir,
-                embedding_fn=self.embedder.embedder,
+                embedding_fn=self.embedder.embed_batch,
             )
             self._memory_hooks = MemoryHooks(
                 memory_manager=self._memory_manager,
-                embedding_fn=self.embedder.embedder,
+                embedding_fn=self.embedder.embed_batch,
                 enabled=True,
             )
             logger.debug("Memory system enabled for suggester")
@@ -122,6 +126,9 @@ class Suggester:
                 if metadata.get("type") == "class":
                     suggestion.superclasses = result.get("superclasses", [])
                     suggestion.subclasses = result.get("subclasses", [])
+                suggestion.dependencies = result.get("dependencies", [])
+                suggestion.dependents = result.get("dependents", [])
+                suggestion.impact_score = result.get("impact_score")
 
             # Generate explanation for top 3 results when requested
             if include_explanations and len(suggestions) < 3:
@@ -153,6 +160,7 @@ class Suggester:
         limit: int = 5,
         min_similarity: float = 0.2,
         include_explanations: bool = True,
+        include_cross_project: bool = False,
     ) -> Dict[str, Any]:
         """Find similar code and enrich with learned patterns.
 
@@ -164,17 +172,20 @@ class Suggester:
             limit: Maximum number of results
             min_similarity: Minimum similarity threshold (0-1)
             include_explanations: Generate LLM explanations
+            include_cross_project: Include cross-project recommendations
 
         Returns:
             Dictionary with:
                 - suggestions: List of code suggestions
                 - matching_patterns: Patterns that match the query
                 - recommendations: Pattern-based recommendations
+                - cross_project_recommendations: Patterns from other projects
         """
         result = {
             "suggestions": [],
             "matching_patterns": [],
             "recommendations": [],
+            "cross_project_recommendations": [],
         }
 
         # Get code suggestions
@@ -209,11 +220,27 @@ class Suggester:
                     ]
 
                 # Record the pattern-aware query
-                self._memory_hooks.on_suggestion(
-                    query=query,
-                    project_name=self.config.project_name,
-                    suggestion=f"Found {len(suggestions)} matches, {len(patterns)} patterns",
-                )
+                if self._memory_hooks:
+                    self._memory_hooks.on_suggestion(
+                        query=query,
+                        project_name=self.config.project_name,
+                        suggestion=(
+                            f"Found {len(suggestions)} matches, {len(patterns)} patterns"
+                        ),
+                    )
+
+                # Cross-project recommendations (opt-in)
+                if (
+                    include_cross_project
+                    and self.config.features.cross_project_recommendations
+                ):
+                    from codesage.memory.pattern_miner import PatternMiner
+
+                    miner = PatternMiner(self._memory_manager)
+                    result["cross_project_recommendations"] = miner.recommend_patterns(
+                        project_name=self.config.project_name,
+                        limit=5,
+                    )
 
             except Exception as e:
                 logger.warning(f"Failed to get patterns: {e}")

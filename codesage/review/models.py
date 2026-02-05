@@ -29,6 +29,7 @@ class FileChange:
     deletions: int = 0
     diff: str = ""
     old_path: Optional[Path] = None
+    content: Optional[str] = None  # Full file content for single file review
 
 
 @dataclass

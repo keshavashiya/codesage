@@ -102,6 +102,13 @@ class CodeContextBuilder:
                 parents = [p.get("name", "?") for p in suggestion.superclasses]
                 graph_info.append(f"Inherits: {', '.join(parents)}")
 
+            if hasattr(suggestion, "dependencies") and suggestion.dependencies:
+                deps = [d.get("name", "?") for d in suggestion.dependencies[:3]]
+                graph_info.append(f"Depends on: {', '.join(deps)}")
+
+            if hasattr(suggestion, "impact_score") and suggestion.impact_score is not None:
+                graph_info.append(f"Impact score: {suggestion.impact_score:.2f}")
+
             graph_context = ""
             if graph_info:
                 graph_context = "\nGraph: " + " | ".join(graph_info) + "\n"

@@ -84,8 +84,12 @@ def stats(
         # Storage stats
         try:
             from codesage.llm.embeddings import EmbeddingService
-            embedder = EmbeddingService(config.llm, config.cache_dir)
-            storage = StorageManager(config, embedding_fn=embedder.embedder)
+            embedder = EmbeddingService(
+                config.llm,
+                config.cache_dir,
+                config.performance,
+            )
+            storage = StorageManager(config, embedding_fn=embedder)
             storage_metrics = storage.get_metrics()
 
             # Vector store stats
@@ -144,4 +148,3 @@ def stats(
                 )
             except Exception as e:
                 console.print(f"[dim]Could not load memory metrics: {e}[/dim]")
-

@@ -75,7 +75,6 @@ class CodeSageMCPServer:
         self._suggester = None
         self._scanner = None
         self._analyzer = None
-        self._analyzer = None
         self._db = None
         self._memory = None
 
@@ -112,8 +111,12 @@ class CodeSageMCPServer:
             from codesage.llm.embeddings import EmbeddingService
 
             # Use embedding service for pattern search
-            embedder = EmbeddingService(self.config.llm, self.config.cache_dir)
-            self._memory = MemoryManager(embedding_fn=embedder.embedder)
+            embedder = EmbeddingService(
+                self.config.llm,
+                self.config.cache_dir,
+                self.config.performance,
+            )
+            self._memory = MemoryManager(embedding_fn=embedder.embed_batch)
         return self._memory
 
     def _register_tools(self) -> None:
@@ -125,7 +128,7 @@ class CodeSageMCPServer:
             return [
                 Tool(
                     name="search_code",
-                    description="Search the codebase for relevant code using semantic search. Returns matching code snippets with file locations and similarity scores.",
+                    description="Search the codebase for relevant code using semantic search. Returns matching code snippets with file locations and similarity scores. Use depth='thorough' for security scanning and full impact analysis.",
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -142,6 +145,17 @@ class CodeSageMCPServer:
                                 "type": "number",
                                 "description": "Minimum similarity threshold 0-1 (default: 0.2)",
                                 "default": 0.2,
+                            },
+                            "include_graph": {
+                                "type": "boolean",
+                                "description": "Include graph context (callers, callees, dependencies)",
+                                "default": True,
+                            },
+                            "depth": {
+                                "type": "string",
+                                "enum": ["quick", "medium", "thorough"],
+                                "default": "medium",
+                                "description": "Analysis depth - 'thorough' includes security scanning and full impact analysis",
                             },
                         },
                         "required": ["query"],
@@ -235,6 +249,91 @@ class CodeSageMCPServer:
                         "required": ["task_description"],
                     },
                 ),
+                Tool(
+                    name="get_implementation_context",
+                    description="Assemble a structured context pack for implementing a task. Use depth='thorough' for comprehensive analysis including security scanning.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "Task description",
+                            },
+                            "files": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional target files",
+                            },
+                            "include_cross_project": {
+                                "type": "boolean",
+                                "description": "Include cross-project recommendations",
+                                "default": False,
+                            },
+                            "depth": {
+                                "type": "string",
+                                "enum": ["quick", "medium", "thorough"],
+                                "default": "medium",
+                                "description": "Analysis depth - 'thorough' includes security scanning and full impact assessment",
+                            },
+                        },
+                        "required": ["task"],
+                    },
+                ),
+                Tool(
+                    name="detect_code_smells",
+                    description="Detect pattern-deviation code smells in a file or current changes.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Optional file path to analyze",
+                            },
+                            "severity": {
+                                "type": "string",
+                                "description": "Comma-separated severities to include",
+                                "default": "warning,error",
+                            },
+                        },
+                    },
+                ),
+                # Unified context tool (consolidates get_task_context + get_implementation_context)
+                Tool(
+                    name="get_context",
+                    description="Get comprehensive context for a coding task. Unified interface supporting different interaction modes: brainstorm (exploration), implement (task-focused), or review (code review).",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "Task or query description",
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["brainstorm", "implement", "review"],
+                                "default": "implement",
+                                "description": "Context mode: brainstorm (exploration), implement (task-focused), review (code review)",
+                            },
+                            "target_files": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional target files to focus on",
+                            },
+                            "depth": {
+                                "type": "string",
+                                "enum": ["quick", "medium", "thorough"],
+                                "default": "medium",
+                                "description": "Analysis depth",
+                            },
+                            "include_cross_project": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "Include cross-project recommendations",
+                            },
+                        },
+                        "required": ["task"],
+                    },
+                ),
             ]
 
         @self.server.call_tool()
@@ -253,6 +352,12 @@ class CodeSageMCPServer:
                     result = await self._tool_get_stats(arguments)
                 elif name == "get_task_context":
                     result = await self._tool_get_task_context(arguments)
+                elif name == "get_implementation_context":
+                    result = await self._tool_get_implementation_context(arguments)
+                elif name == "detect_code_smells":
+                    result = await self._tool_detect_code_smells(arguments)
+                elif name == "get_context":
+                    result = await self._tool_get_context(arguments)
                 else:
                     result = {"error": f"Unknown tool: {name}"}
 
@@ -281,16 +386,39 @@ class CodeSageMCPServer:
         query = args.get("query", "")
         limit = args.get("limit", 5)
         min_similarity = args.get("min_similarity", 0.2)
+        include_graph = args.get("include_graph", True)
+        depth = args.get("depth", "medium")
+
+        # For thorough depth, use deep analyzer
+        if depth == "thorough":
+            from codesage.core.deep_analyzer import DeepAnalyzer
+
+            analyzer = DeepAnalyzer(self.config)
+            deep_result = analyzer.analyze_sync(query, depth="thorough")
+
+            return {
+                "query": query,
+                "depth": depth,
+                "count": len(deep_result.semantic_results),
+                "results": deep_result.semantic_results,
+                "security_issues": deep_result.security_issues,
+                "impact_analysis": deep_result.impact_analysis,
+                "risk_score": deep_result.risk_score,
+                "recommendations": deep_result.recommendations,
+                "patterns": deep_result.patterns,
+            }
 
         suggestions = self.suggester.find_similar(
             query=query,
             limit=limit,
             min_similarity=min_similarity,
             include_explanations=True,
+            include_graph_context=include_graph,
         )
 
         return {
             "query": query,
+            "depth": depth,
             "count": len(suggestions),
             "results": [
                 {
@@ -301,6 +429,19 @@ class CodeSageMCPServer:
                     "similarity": round(s.similarity, 3),
                     "code": s.code,
                     "explanation": s.explanation,
+                    "callers": s.callers if include_graph else [],
+                    "callees": s.callees if include_graph else [],
+                    "dependencies": s.dependencies if include_graph else [],
+                    "impact_score": s.impact_score if include_graph else None,
+                    "relationship_summary": (
+                        {
+                            "callers": len(s.callers),
+                            "callees": len(s.callees),
+                            "dependencies": len(s.dependencies),
+                        }
+                        if include_graph
+                        else {}
+                    ),
                 }
                 for s in suggestions
             ],
@@ -499,8 +640,12 @@ class CodeSageMCPServer:
             from codesage.llm.embeddings import EmbeddingService
 
             try:
-                embedder = EmbeddingService(self.config.llm, self.config.cache_dir)
-                storage = StorageManager(self.config, embedding_fn=embedder.embedder)
+                embedder = EmbeddingService(
+                    self.config.llm,
+                    self.config.cache_dir,
+                    self.config.performance,
+                )
+                storage = StorageManager(self.config, embedding_fn=embedder)
                 result["storage_metrics"] = storage.get_metrics()
             except Exception as e:
                 result["storage_metrics"] = {"error": str(e)}
@@ -584,6 +729,233 @@ class CodeSageMCPServer:
                 pass
 
         return context
+
+    async def _tool_get_implementation_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute get_implementation_context tool."""
+        task = args.get("task", "")
+        if not task:
+            return {"error": "task is required"}
+
+        if not self.config.features.context_provider_mode:
+            return {"error": "context_provider_mode feature is disabled"}
+
+        include_cross_project = args.get("include_cross_project", False)
+        if include_cross_project and not self.config.features.cross_project_recommendations:
+            return {"error": "cross_project_recommendations feature is disabled"}
+
+        depth = args.get("depth", "medium")
+
+        from codesage.core.context_provider import ContextProvider
+
+        provider = ContextProvider(self.config)
+        context = provider.get_implementation_context(
+            task_description=task,
+            target_files=args.get("files"),
+            include_cross_project=include_cross_project,
+        )
+
+        result = context.to_dict()
+        result["depth"] = depth
+
+        # For thorough depth, enrich with deep analysis
+        if depth == "thorough":
+            from codesage.core.deep_analyzer import DeepAnalyzer
+
+            analyzer = DeepAnalyzer(self.config)
+            deep_result = analyzer.analyze_sync(task, depth="thorough")
+
+            result["deep_analysis"] = {
+                "risk_score": deep_result.risk_score,
+                "impact_analysis": deep_result.impact_analysis,
+                "security_issues": deep_result.security_issues,
+                "recommendations": deep_result.recommendations,
+            }
+
+        return result
+
+    async def _tool_detect_code_smells(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute detect_code_smells tool."""
+        if not self.config.features.code_smell_detection:
+            return {"error": "code_smell_detection feature is disabled"}
+
+        from codesage.review.smells import PatternDeviationDetector
+        from codesage.review.diff import DiffExtractor
+
+        detector = PatternDeviationDetector(self.config)
+        file_path = args.get("file_path")
+        severity = args.get("severity", "warning,error")
+        allowed = {s.strip().lower() for s in severity.split(",") if s.strip()}
+
+        smells = []
+        if file_path:
+            smells = detector.detect_file(self.project_path / file_path)
+        else:
+            diff = DiffExtractor(self.project_path)
+            changes = diff.get_all_changes()
+            for change in changes:
+                if change.status == "D":
+                    continue
+                smells.extend(detector.detect_file(change.path))
+
+        if allowed:
+            smells = [s for s in smells if s.severity.lower() in allowed]
+
+        return {"count": len(smells), "results": [s.to_dict() for s in smells]}
+
+    async def _tool_get_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute unified get_context tool.
+
+        Combines task context and implementation context with mode-aware behavior.
+        """
+        task = args.get("task", "")
+        if not task:
+            return {"error": "task is required"}
+
+        mode = args.get("mode", "implement")
+        depth = args.get("depth", "medium")
+        target_files = args.get("target_files", [])
+        include_cross_project = args.get("include_cross_project", False)
+
+        result = {
+            "task": task,
+            "mode": mode,
+            "depth": depth,
+        }
+
+        # Mode-specific context building
+        if mode == "brainstorm":
+            # Exploration mode: rich search results + patterns + related concepts
+            try:
+                # Semantic search with more results
+                search_results = self.suggester.find_similar(
+                    query=task,
+                    limit=7,
+                    min_similarity=0.2,
+                    include_graph_context=True,
+                )
+                result["relevant_code"] = [
+                    {
+                        "file": str(s.file),
+                        "name": s.name,
+                        "type": s.element_type,
+                        "similarity": round(s.similarity, 2),
+                        "code_preview": s.code[:200] if s.code else "",
+                        "callers": len(s.callers) if s.callers else 0,
+                        "callees": len(s.callees) if s.callees else 0,
+                    }
+                    for s in search_results
+                ]
+
+                # Get patterns
+                patterns = self.memory.find_similar_patterns(task, limit=5)
+                result["patterns"] = [
+                    {"name": p.get("name"), "description": p.get("description", "")[:100]}
+                    for p in patterns
+                ]
+
+                # Get preferences
+                result["preferences"] = self.memory.get_all_preferences(category="general")
+
+            except Exception as e:
+                result["error"] = str(e)
+
+        elif mode == "implement":
+            # Implementation mode: structured context pack
+            if not self.config.features.context_provider_mode:
+                result["warning"] = "context_provider_mode feature is disabled, returning basic context"
+
+            try:
+                from codesage.core.context_provider import ContextProvider
+
+                provider = ContextProvider(self.config)
+                context = provider.get_implementation_context(
+                    task_description=task,
+                    target_files=target_files if target_files else None,
+                    include_cross_project=include_cross_project,
+                )
+                impl_data = context.to_dict()
+
+                result["relevant_code"] = impl_data.get("relevant_code", [])
+                result["implementation_plan"] = impl_data.get("implementation_plan", {})
+                result["suggested_files"] = impl_data.get("suggested_files", [])
+                result["dependencies"] = impl_data.get("dependencies", [])
+                result["patterns"] = impl_data.get("patterns", [])
+                result["security"] = impl_data.get("security", {})
+
+                # For thorough depth, add deep analysis
+                if depth == "thorough":
+                    from codesage.core.deep_analyzer import DeepAnalyzer
+
+                    analyzer = DeepAnalyzer(self.config)
+                    deep_result = analyzer.analyze_sync(task, depth="thorough")
+
+                    result["deep_analysis"] = {
+                        "risk_score": deep_result.risk_score,
+                        "impact_analysis": deep_result.impact_analysis,
+                        "security_issues": deep_result.security_issues,
+                        "recommendations": deep_result.recommendations,
+                    }
+
+            except Exception as e:
+                result["error"] = str(e)
+
+        elif mode == "review":
+            # Review mode: focus on code quality and issues
+            try:
+                # Search for relevant code
+                search_results = self.suggester.find_similar(
+                    query=task,
+                    limit=5,
+                    min_similarity=0.3,
+                )
+                result["relevant_code"] = [
+                    {
+                        "file": str(s.file),
+                        "name": s.name,
+                        "type": s.element_type,
+                        "similarity": round(s.similarity, 2),
+                    }
+                    for s in search_results
+                ]
+
+                # Include security analysis if files specified
+                if target_files:
+                    from codesage.security.scanner import SecurityScanner
+
+                    scanner = SecurityScanner()
+                    all_findings = []
+                    for f in target_files[:5]:  # Limit
+                        path = self.project_path / f
+                        if path.exists():
+                            findings = scanner.scan_file(path)
+                            all_findings.extend(findings)
+
+                    result["security_findings"] = [
+                        {
+                            "severity": f.severity if hasattr(f, 'severity') else "unknown",
+                            "message": f.message if hasattr(f, 'message') else str(f),
+                            "file": str(f.file_path) if hasattr(f, 'file_path') else "",
+                        }
+                        for f in all_findings[:10]
+                    ]
+
+                # Include code smell detection if enabled
+                if self.config.features.code_smell_detection:
+                    from codesage.review.smells import PatternDeviationDetector
+
+                    detector = PatternDeviationDetector(self.config)
+                    smells = []
+                    for f in target_files[:5]:
+                        path = self.project_path / f
+                        if path.exists():
+                            smells.extend(detector.detect_file(path))
+
+                    result["code_smells"] = [s.to_dict() for s in smells[:10]]
+
+            except Exception as e:
+                result["error"] = str(e)
+
+        return result
 
     def _register_resources(self) -> None:
         """Register MCP resources."""
@@ -709,4 +1081,3 @@ async def run_mcp_server(
         await server.run_sse(host=host, port=port)
     else:
         raise ValueError(f"Unknown transport: {transport}. Use 'stdio' or 'sse'")
-

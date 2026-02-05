@@ -24,6 +24,9 @@ class Suggestion:
     callees: List[Dict[str, Any]] = field(default_factory=list)
     superclasses: List[Dict[str, Any]] = field(default_factory=list)
     subclasses: List[Dict[str, Any]] = field(default_factory=list)
+    dependencies: List[Dict[str, Any]] = field(default_factory=list)
+    dependents: List[Dict[str, Any]] = field(default_factory=list)
+    impact_score: Optional[float] = None
 
     # Pattern context (from memory system)
     matching_patterns: List[Dict[str, Any]] = field(default_factory=list)
@@ -51,6 +54,12 @@ class Suggestion:
             result["superclasses"] = self.superclasses
         if self.subclasses:
             result["subclasses"] = self.subclasses
+        if self.dependencies:
+            result["dependencies"] = self.dependencies
+        if self.dependents:
+            result["dependents"] = self.dependents
+        if self.impact_score is not None:
+            result["impact_score"] = self.impact_score
         if self.matching_patterns:
             result["matching_patterns"] = self.matching_patterns
 
@@ -58,7 +67,14 @@ class Suggestion:
 
     def has_graph_context(self) -> bool:
         """Check if suggestion has graph context."""
-        return bool(self.callers or self.callees or self.superclasses or self.subclasses)
+        return bool(
+            self.callers
+            or self.callees
+            or self.superclasses
+            or self.subclasses
+            or self.dependencies
+            or self.dependents
+        )
 
 
 @dataclass

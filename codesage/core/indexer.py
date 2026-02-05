@@ -46,12 +46,16 @@ class Indexer:
         self.config = config
 
         # Initialize embedding service
-        self.embedder = EmbeddingService(config.llm, config.cache_dir)
+        self.embedder = EmbeddingService(
+            config.llm,
+            config.cache_dir,
+            config.performance,
+        )
 
         # Initialize unified storage manager
         self.storage = StorageManager(
             config=config,
-            embedding_fn=self.embedder.embedder,
+            embedding_fn=self.embedder,
         )
 
         # Legacy compatibility
@@ -62,7 +66,7 @@ class Indexer:
         self._memory_hooks: Optional[MemoryHooks] = None
         if config.memory.enabled and config.memory.learn_on_index:
             self._memory_hooks = MemoryHooks(
-                embedding_fn=self.embedder.embedder,
+                embedding_fn=self.embedder.embed_batch,
                 enabled=True,
             )
             logger.debug("Memory learning enabled for indexer")
@@ -236,6 +240,8 @@ class Indexer:
             "relationships_added": 0,
             "errors": 0,
         }
+        self._batch_elements = []
+        self._batch_file_count = 0
 
         # Collect files first to show accurate progress
         files = list(self.walk_repository())
@@ -256,12 +262,21 @@ class Indexer:
                         advance=1,
                     )
 
-                    self.index_file(file_path, force=not incremental)
+                    self._index_file_for_batch(
+                        file_path,
+                        force=not incremental,
+                    )
 
                 progress.update(task, description="[green]✓ Complete")
         else:
             for file_path in files:
-                self.index_file(file_path, force=not incremental)
+                self._index_file_for_batch(
+                    file_path,
+                    force=not incremental,
+                )
+
+        # Flush any remaining batch embeddings
+        self._flush_batch_embeddings()
 
         # Update database stats
         self.db.update_stats(
@@ -282,6 +297,104 @@ class Indexer:
             )
 
         return self.stats
+
+    def _index_file_for_batch(self, file_path: Path, force: bool = False) -> int:
+        """Index a file and queue elements for batched embedding storage.
+
+        This stores metadata and graph data immediately, while deferring
+        vector embeddings to a batch call.
+        """
+        if not hasattr(self, "_batch_elements"):
+            self._batch_elements: List[CodeElement] = []
+            self._batch_file_count = 0
+
+        # Check if re-indexing is needed
+        if not force and not self._should_reindex(file_path):
+            self.stats["files_skipped"] += 1
+            return 0
+
+        # Get parser for file type
+        parser = ParserRegistry.get_parser_for_file(file_path)
+        if not parser:
+            return 0
+
+        try:
+            elements = parser.parse_file(file_path)
+            if not elements:
+                return 0
+
+            # Clear old data for this file
+            self.storage.delete_by_file(file_path)
+
+            # Store metadata immediately (SQLite)
+            self.db.store_elements(elements)
+
+            # Add element nodes to graph immediately for relationship inserts
+            if self.storage.graph_store:
+                self.storage._add_to_graph(elements)
+
+            # Extract and store relationships (calls, imports, inheritance)
+            if self.config.storage.use_graph:
+                try:
+                    nodes, relationships = extract_relationships_from_file(
+                        file_path, elements
+                    )
+                    if nodes and self.storage.graph_store:
+                        self.storage.graph_store.add_nodes(nodes)
+                        self.stats["nodes_added"] += len(nodes)
+
+                    if relationships:
+                        self.storage.add_relationships(relationships)
+                        self.stats["relationships_added"] += len(relationships)
+                except Exception as e:
+                    logger.warning(f"Error extracting relationships from {file_path}: {e}")
+
+            # Update file hash
+            self.db.set_file_hash(file_path, self._compute_file_hash(file_path))
+
+            # Learn patterns from indexed elements
+            if self._memory_hooks:
+                element_dicts = [el.to_dict() for el in elements]
+                self._memory_hooks.on_elements_indexed(
+                    element_dicts,
+                    self.config.project_name,
+                    file_path,
+                )
+
+            self.stats["files_indexed"] += 1
+            self.stats["elements_found"] += len(elements)
+            self.stats["nodes_added"] += len(elements)
+
+            # Queue for batched embedding insertion
+            self._batch_elements.extend(elements)
+            self._batch_file_count += 1
+
+            max_files = self.config.performance.embedding_batch_size
+            max_elements = self.config.performance.max_elements_per_batch
+
+            if (
+                self._batch_file_count >= max_files
+                or len(self._batch_elements) >= max_elements
+            ):
+                self._flush_batch_embeddings()
+
+            return len(elements)
+
+        except Exception as e:
+            self.stats["errors"] += 1
+            logger.error(f"Error indexing {file_path}: {e}")
+            return 0
+
+    def _flush_batch_embeddings(self) -> None:
+        """Flush queued elements to the vector store in a single batch."""
+        if not hasattr(self, "_batch_elements"):
+            return
+        if not self._batch_elements:
+            return
+        if self.storage.vector_store:
+            self.storage.vector_store.add_elements(self._batch_elements)
+        self._batch_elements = []
+        self._batch_file_count = 0
 
     def clear_index(self) -> None:
         """Clear all indexed data from all backends."""
@@ -308,7 +421,7 @@ class Indexer:
         elif enabled and self.config.memory.enabled:
             # Create hooks if they don't exist and learning is requested
             self._memory_hooks = MemoryHooks(
-                embedding_fn=self.embedder.embedder,
+                embedding_fn=self.embedder.embed_batch,
                 enabled=True,
             )
 
@@ -321,4 +434,3 @@ class Indexer:
         if self._memory_hooks:
             return self._memory_hooks.get_stats()
         return None
-

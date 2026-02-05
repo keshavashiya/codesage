@@ -294,6 +294,14 @@ def create_lance_embedding_fn(embedder) -> EmbeddingFunction:
     """
 
     def embed_fn(texts: List[str]) -> List[List[float]]:
-        return embedder.embed_documents(texts)
+        if hasattr(embedder, "embed_batch"):
+            return embedder.embed_batch(texts)
+        if hasattr(embedder, "embed_documents"):
+            return embedder.embed_documents(texts)
+        if callable(embedder):
+            return embedder(texts)
+        raise TypeError(
+            "Embedding function must be callable or provide embed_batch/embed_documents"
+        )
 
     return embed_fn
