@@ -1,65 +1,44 @@
 # CodeSage
 
-Local-first code intelligence CLI with MCP support for Claude Desktop, Cursor, and Windsurf.
+Local-first code intelligence CLI powered by Ollama. Search your codebase using natural language.
 
-Index your codebase and search it using natural language. Everything runs locally with Ollama.
-Supports Python, JavaScript, TypeScript, Go, and Rust.
+Works with Claude Desktop, Cursor, and Windsurf via MCP.
 
 ## Install
 
-### Recommended: pipx
-
-We strongly recommend installing CodeSage with [pipx](https://pypa.github.io/pipx/) to run it in an isolated environment.
-
-1.  **Install pipx** (if not already installed):
-
-    ```bash
-    # macOS
-    brew install pipx
-    pipx ensurepath
-
-    # Linux/Windows
-    python3 -m pip install --user pipx
-    python3 -m pipx ensurepath
-    ```
-
-2.  **Install CodeSage**:
-
-    ```bash
-    # Install Python 3.10+ (Recommended)
-    brew install python@3.11
-
-    # Install CodeSage using the specific python version
-    pipx install --python python3.11 pycodesage
-    ```
-
-    *Note: You can use any installed Python version >= 3.10 (e.g., `python3.10`, `python3.12`).*
-
-    *Note: To add optional features later (e.g., multi-language support), use `pipx inject`:*
-    ```bash
-    pipx inject pycodesage mcp
-    pipx inject pycodesage pycodesage[multi-language]
-    ```
-
-### Alternative: pip
-
-You can also install via standard pip, though this may conflict with other packages:
-
 ```bash
+# Recommended: pipx (isolated environment)
+pipx install pycodesage
+
+# Or pip
 pip install pycodesage
 ```
 
-Or from source:
+<details>
+<summary>Detailed installation</summary>
 
 ```bash
-git clone https://github.com/keshavashiya/codesage.git
-cd codesage
-pip install -e .
+# macOS
+brew install pipx
+pipx ensurepath
+
+# Linux/Windows
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+
+# Install with specific Python version
+pipx install --python python3.11 pycodesage
+
+# Add optional features
+pipx inject pycodesage pycodesage[multi-language]  # JS, TS, Go, Rust
+pipx inject pycodesage pycodesage[mcp]             # MCP server
 ```
+
+</details>
 
 ## Requirements
 
-**Ollama** must be running with these models:
+**Ollama** must be running:
 
 ```bash
 ollama pull qwen2.5-coder:7b
@@ -70,19 +49,79 @@ ollama serve
 ## Usage
 
 ```bash
-# Initialize and index your project
 cd your-project
-codesage init
-codesage index
-
-# Search your code
-codesage suggest "validate email"
-
-# Check everything is working
-codesage health
+codesage init      # Initialize
+codesage index     # Build index
+codesage search "validate email"   # Search
+codesage chat      # Interactive mode
 ```
 
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `init` | Initialize project |
+| `index` | Build code index |
+| `search QUERY` | Semantic code search |
+| `chat` | Interactive chat mode |
+| `review` | AI code review |
+| `stats` | Show index statistics |
+
+<details>
+<summary>Search options</summary>
+
+```bash
+codesage search "auth flow" --depth thorough  # Deep analysis
+codesage search "api handlers" --patterns     # Include learned patterns
+codesage search "database" --context          # Show surrounding code
+codesage search "errors" --json               # JSON output
+```
+
+</details>
+
+<details>
+<summary>Chat commands</summary>
+
+```
+/search <query>   Semantic search
+/plan <task>      Implementation plan
+/deep <query>     Multi-agent analysis
+/review [file]    Code review
+/security [path]  Security scan
+/impact <element> Blast radius analysis
+/similar <code>   Find similar patterns
+/patterns         Learned patterns
+/mode <mode>      Switch mode (brainstorm/implement/review)
+/export [file]    Save conversation
+/help             Show all commands
+```
+
+</details>
+
+<details>
+<summary>Other commands</summary>
+
+```bash
+# MCP server
+codesage mcp serve              # Start server
+codesage mcp serve --global     # All indexed projects
+codesage mcp test               # Test tools
+
+# Developer profile
+codesage profile show           # View profile
+codesage profile patterns       # Learned patterns
+
+# Configuration
+codesage config features list   # Feature flags
+codesage config storage info    # Storage details
+codesage config hooks install   # Git pre-commit hook
+```
+
+</details>
+
 ## MCP Setup
+
+Add to your MCP client config:
 
 ```json
 {
@@ -96,47 +135,28 @@ codesage health
 ```
 
 <details>
-<summary>Other MCP clients (Cursor, Windsurf)</summary>
+<summary>MCP tools available</summary>
 
-**Cursor:** Settings → Features → MCP Servers, add same config.
-
-**Windsurf:** Settings → MCP → Add Server. Command: `codesage`, Args: `mcp serve --global`
+| Tool | Description |
+|------|-------------|
+| `search_code` | Semantic code search |
+| `get_file_context` | File with dependencies |
+| `get_task_context` | Implementation guidance |
+| `review_code` | Code review |
+| `analyze_security` | Vulnerability scan |
+| `detect_code_smells` | Pattern deviations |
+| `get_stats` | Index statistics |
 
 </details>
 
-## Commands
-
-```bash
-codesage init           # Initialize project
-codesage index          # Index codebase
-codesage suggest QUERY  # Search code
-codesage stats          # Show stats
-codesage health         # System check
-codesage review         # AI code review
-codesage chat           # Interactive mode
-```
-
 <details>
-<summary>More commands</summary>
+<summary>Client-specific setup</summary>
 
-```bash
-# MCP
-codesage mcp serve          # Start server
-codesage mcp serve --global # All projects
-codesage mcp test           # Test tools
+**Claude Desktop:** Add config above to `claude_desktop_config.json`
 
-# Security
-codesage security scan      # Scan vulnerabilities
-codesage hooks install      # Pre-commit hook
+**Cursor:** Settings → Features → MCP Servers → Add config
 
-# Storage
-codesage storage info       # Backend details
-codesage storage stats      # Metrics
-
-# Profile
-codesage profile show       # Developer profile
-codesage profile patterns   # Learned patterns
-```
+**Windsurf:** Settings → MCP → Add Server. Command: `codesage`, Args: `mcp serve --global`
 
 </details>
 
@@ -156,14 +176,58 @@ llm:
   embedding_model: mxbai-embed-large
 
 exclude_dirs:
-  - venv
   - node_modules
+  - venv
   - .git
 ```
+
+<details>
+<summary>All configuration options</summary>
+
+```yaml
+# LLM settings
+llm:
+  provider: ollama          # ollama, openai, anthropic
+  model: qwen2.5-coder:7b
+  embedding_model: mxbai-embed-large
+  base_url: http://localhost:11434
+  temperature: 0.3
+
+# Storage
+storage:
+  vector_backend: lancedb
+  use_graph: true
+
+# Security scanning
+security:
+  enabled: true
+  severity_threshold: medium
+
+# Developer memory
+memory:
+  enabled: true
+  global_dir: ~/.codesage/developer
+  learn_on_index: true
+
+# Feature flags
+features:
+  memory: true
+  graph_storage: true
+  code_smell_detection: false
+```
+
+</details>
+
+## Language Support
+
+- **Python** (built-in)
+- JavaScript, TypeScript, Go, Rust (with `pycodesage[multi-language]`)
 
 ## Development
 
 ```bash
+git clone https://github.com/keshavashiya/codesage.git
+cd codesage
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
