@@ -223,6 +223,36 @@ class LLMProvider:
             logger.error(f"Chat completion failed after retries: {e}")
             raise LLMProviderError(f"Failed to complete chat: {e}") from e
 
+    def stream_chat(self, messages: List[Dict[str, str]]):
+        """Stream chat completion tokens.
+
+        Yields:
+            String chunks as they arrive from the LLM.
+        """
+        self._rate_limiter.acquire()
+
+        lc_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            if role == "system":
+                lc_messages.append(SystemMessage(content=content))
+            elif role == "assistant":
+                lc_messages.append(AIMessage(content=content))
+            else:
+                lc_messages.append(HumanMessage(content=content))
+
+        try:
+            for chunk in self._llm.stream(lc_messages):
+                content = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                if content:
+                    yield content
+        except TimeoutError as e:
+            raise LLMTimeoutError(f"Stream request timed out: {e}") from e
+        except ConnectionError as e:
+            raise LLMConnectionError(f"Failed to connect to LLM for streaming: {e}") from e
+
     def is_available(self) -> bool:
         """Check if the LLM is available and configured."""
         try:

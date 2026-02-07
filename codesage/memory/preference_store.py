@@ -156,7 +156,9 @@ class PreferenceStore(ConnectionManager):
                     json.dumps(preference.value),
                     preference.category,
                     preference.description,
-                    preference.updated_at.isoformat() if preference.updated_at else datetime.now().isoformat(),
+                    preference.updated_at.isoformat()
+                    if preference.updated_at
+                    else datetime.now().isoformat(),
                 ),
             )
 
@@ -185,7 +187,9 @@ class PreferenceStore(ConnectionManager):
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
-    def get_all_preferences(self, category: Optional[str] = None) -> List[DeveloperPreference]:
+    def get_all_preferences(
+        self, category: Optional[str] = None
+    ) -> List[DeveloperPreference]:
         """Get all preferences, optionally filtered by category.
 
         Args:
@@ -249,8 +253,12 @@ class PreferenceStore(ConnectionManager):
                     json.dumps(pattern.examples),
                     pattern.occurrence_count,
                     pattern.confidence_score,
-                    pattern.first_seen.isoformat() if pattern.first_seen else datetime.now().isoformat(),
-                    pattern.last_seen.isoformat() if pattern.last_seen else datetime.now().isoformat(),
+                    pattern.first_seen.isoformat()
+                    if pattern.first_seen
+                    else datetime.now().isoformat(),
+                    pattern.last_seen.isoformat()
+                    if pattern.last_seen
+                    else datetime.now().isoformat(),
                 ),
             )
 
@@ -406,7 +414,9 @@ class PreferenceStore(ConnectionManager):
             pattern_id: Pattern ID to delete.
         """
         with self.transaction() as conn:
-            conn.execute("DELETE FROM pattern_projects WHERE pattern_id = ?", (pattern_id,))
+            conn.execute(
+                "DELETE FROM pattern_projects WHERE pattern_id = ?", (pattern_id,)
+            )
             conn.execute("DELETE FROM patterns WHERE id = ?", (pattern_id,))
 
     # ==================== Project Operations ====================
@@ -432,8 +442,12 @@ class PreferenceStore(ConnectionManager):
                     project.language,
                     project.total_files,
                     project.total_elements,
-                    project.first_indexed.isoformat() if project.first_indexed else datetime.now().isoformat(),
-                    project.last_indexed.isoformat() if project.last_indexed else datetime.now().isoformat(),
+                    project.first_indexed.isoformat()
+                    if project.first_indexed
+                    else datetime.now().isoformat(),
+                    project.last_indexed.isoformat()
+                    if project.last_indexed
+                    else datetime.now().isoformat(),
                     project.patterns_learned,
                 ),
             )
@@ -515,8 +529,16 @@ class PreferenceStore(ConnectionManager):
             total_elements: New element count (optional).
             patterns_learned: New patterns count (optional).
         """
-        updates = ["last_indexed = ?"]
-        params: List[Any] = [datetime.now().isoformat()]
+        # Whitelist of allowed columns for security
+        allowed_columns = {
+            "total_files",
+            "total_elements",
+            "patterns_learned",
+            "last_indexed",
+        }
+
+        updates: List[str] = []
+        params: List[Any] = []
 
         if total_files is not None:
             updates.append("total_files = ?")
@@ -528,13 +550,18 @@ class PreferenceStore(ConnectionManager):
             updates.append("patterns_learned = ?")
             params.append(patterns_learned)
 
+        if not updates:
+            return
+
+        # Always update last_indexed
+        updates.append("last_indexed = ?")
+        params.append(datetime.now().isoformat())
         params.append(name)
 
         with self.transaction() as conn:
-            conn.execute(
-                f"UPDATE projects SET {', '.join(updates)} WHERE name = ?",
-                params,
-            )
+            # Build query safely with validated column names only
+            query = f"UPDATE projects SET {', '.join(updates)} WHERE name = ?"
+            conn.execute(query, params)
 
     def delete_project(self, name: str) -> None:
         """Delete a project.
@@ -543,9 +570,7 @@ class PreferenceStore(ConnectionManager):
             name: Project name to delete.
         """
         with self.transaction() as conn:
-            conn.execute(
-                "DELETE FROM pattern_projects WHERE project_name = ?", (name,)
-            )
+            conn.execute("DELETE FROM pattern_projects WHERE project_name = ?", (name,))
             conn.execute("DELETE FROM projects WHERE name = ?", (name,))
 
     # ==================== Interaction Operations ====================
@@ -570,9 +595,13 @@ class PreferenceStore(ConnectionManager):
                     interaction.project_name,
                     interaction.query,
                     interaction.response,
-                    1 if interaction.accepted else (0 if interaction.accepted is False else None),
+                    1
+                    if interaction.accepted
+                    else (0 if interaction.accepted is False else None),
                     interaction.feedback,
-                    interaction.timestamp.isoformat() if interaction.timestamp else datetime.now().isoformat(),
+                    interaction.timestamp.isoformat()
+                    if interaction.timestamp
+                    else datetime.now().isoformat(),
                     json.dumps(interaction.metadata),
                 ),
             )
@@ -619,7 +648,9 @@ class PreferenceStore(ConnectionManager):
                 project_name=row["project_name"],
                 query=row["query"],
                 response=row["response"],
-                accepted=True if row["accepted"] == 1 else (False if row["accepted"] == 0 else None),
+                accepted=True
+                if row["accepted"] == 1
+                else (False if row["accepted"] == 0 else None),
                 feedback=row["feedback"],
                 timestamp=datetime.fromisoformat(row["timestamp"]),
                 metadata=json.loads(row["metadata"]),
@@ -649,7 +680,9 @@ class PreferenceStore(ConnectionManager):
         row = self.conn.execute(
             "SELECT AVG(CASE WHEN accepted = 1 THEN 1.0 ELSE 0.0 END) as rate FROM interactions WHERE accepted IS NOT NULL"
         ).fetchone()
-        stats["acceptance_rate"] = row["rate"] if row and row["rate"] is not None else 0.0
+        stats["acceptance_rate"] = (
+            row["rate"] if row and row["rate"] is not None else 0.0
+        )
 
         return stats
 

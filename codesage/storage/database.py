@@ -272,18 +272,63 @@ class Database(ConnectionManager):
 
         elements = []
         for row in cursor.fetchall():
-            elements.append(CodeElement(
-                id=row["id"],
-                file=Path(row["file"]),
-                type=row["type"],
-                name=row["name"],
-                code=row["code"],
-                language=row["language"],
-                line_start=row["line_start"],
-                line_end=row["line_end"],
-                docstring=row["docstring"],
-                signature=row["signature"],
-            ))
+            elements.append(
+                CodeElement(
+                    id=row["id"],
+                    file=Path(row["file"]),
+                    type=row["type"],
+                    name=row["name"],
+                    code=row["code"],
+                    language=row["language"],
+                    line_start=row["line_start"],
+                    line_end=row["line_end"],
+                    docstring=row["docstring"],
+                    signature=row["signature"],
+                )
+            )
+        return elements
+
+    def find_elements_by_name(self, name: str, limit: int = 10) -> List[CodeElement]:
+        """Find elements by exact name match.
+
+        Performs case-sensitive exact name matching for precise lookups.
+        This is useful when you know the exact function/class name and want
+        to avoid semantic search ambiguity.
+
+        Args:
+            name: Exact name to search for (case-sensitive).
+            limit: Maximum number of results to return.
+
+        Returns:
+            List of CodeElement matching the exact name.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT id, file, type, name, code, language, line_start, line_end,
+                   docstring, signature
+            FROM code_elements WHERE name = ?
+            ORDER BY line_start ASC
+            LIMIT ?
+            """,
+            (name, limit),
+        )
+
+        elements = []
+        for row in cursor.fetchall():
+            elements.append(
+                CodeElement(
+                    id=row["id"],
+                    file=Path(row["file"]),
+                    type=row["type"],
+                    name=row["name"],
+                    code=row["code"],
+                    language=row["language"],
+                    line_start=row["line_start"],
+                    line_end=row["line_end"],
+                    docstring=row["docstring"],
+                    signature=row["signature"],
+                )
+            )
         return elements
 
     # -------------------------------------------------------------------------

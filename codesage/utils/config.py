@@ -14,7 +14,7 @@ class LLMConfig:
 
     provider: str = "ollama"  # ollama, openai, anthropic
     model: str = "qwen2.5-coder:7b"
-    embedding_model: str = "mxbai-embed-large"
+    embedding_model: str = "qwen3-embedding"
     base_url: Optional[str] = "http://localhost:11434"
     api_key: Optional[str] = field(default_factory=lambda: os.getenv("CODESAGE_API_KEY"))
     temperature: float = 0.3
@@ -327,7 +327,7 @@ class Config:
 def initialize_project(
     project_path: Path,
     model: str = "qwen2.5-coder:7b",
-    embedding_model: str = "mxbai-embed-large",
+    embedding_model: str = "qwen3-embedding",
     auto_detect: bool = True,
 ) -> Config:
     """Initialize CodeSage in a project directory.

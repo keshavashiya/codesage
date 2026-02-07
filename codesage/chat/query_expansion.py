@@ -261,6 +261,118 @@ class QueryExpander:
     ) -> ExpandedQuery:
         """Expand a user query with full context.
 
+        Tries LLM-powered expansion first, falls back to static expansion.
+
+        Args:
+            query: Original user query
+            conversation: Optional conversation context
+
+        Returns:
+            ExpandedQuery with all expansion results
+        """
+        # Try LLM expansion first
+        llm_result = self._expand_with_llm(query, conversation)
+        if llm_result is not None:
+            return llm_result
+
+        # Fallback to static expansion
+        return self._expand_static(query, conversation)
+
+    def _expand_with_llm(
+        self, query: str, conversation: Optional[ConversationContext] = None
+    ) -> Optional[ExpandedQuery]:
+        """Try LLM-powered query expansion. Returns None on failure."""
+        try:
+            from codesage.llm.provider import LLMProvider
+            from codesage.utils.config import LLMConfig
+            from codesage.llm.prompts import QUERY_EXPANSION_PROMPT, QUERY_EXPANSION_SYSTEM
+            import json
+
+            llm = self.llm or LLMProvider(LLMConfig())
+
+            mode = "brainstorm"
+            recent_topics = "none"
+            if conversation:
+                mode = conversation.current_mode or "brainstorm"
+                if conversation.recent_topics:
+                    recent_topics = ", ".join(conversation.recent_topics[-5:])
+
+            prompt = QUERY_EXPANSION_PROMPT.format(
+                query=query,
+                mode=mode,
+                recent_topics=recent_topics,
+            )
+
+            response = llm.generate(prompt, system_prompt=QUERY_EXPANSION_SYSTEM)
+
+            # Try to parse JSON from response (handle markdown code blocks)
+            response_text = response.strip()
+            if response_text.startswith("```"):
+                # Strip markdown code block
+                lines = response_text.split("\n")
+                response_text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
+            parsed = json.loads(response_text)
+
+            # Map intent string to UserIntent enum (with synonyms)
+            intent_map = {
+                "explain": UserIntent.EXPLAIN,
+                "understand": UserIntent.EXPLAIN,
+                "learn": UserIntent.EXPLAIN,
+                "how": UserIntent.EXPLAIN,
+                "implement": UserIntent.IMPLEMENT,
+                "build": UserIntent.IMPLEMENT,
+                "create": UserIntent.IMPLEMENT,
+                "add": UserIntent.IMPLEMENT,
+                "debug": UserIntent.DEBUG,
+                "fix": UserIntent.DEBUG,
+                "troubleshoot": UserIntent.DEBUG,
+                "refactor": UserIntent.REFACTOR,
+                "improve": UserIntent.REFACTOR,
+                "optimize": UserIntent.REFACTOR,
+                "review": UserIntent.REVIEW,
+                "audit": UserIntent.REVIEW,
+                "check": UserIntent.REVIEW,
+                "search": UserIntent.SEARCH,
+                "find": UserIntent.SEARCH,
+                "locate": UserIntent.SEARCH,
+                "explore": UserIntent.EXPLORE,
+                "discover": UserIntent.EXPLORE,
+                "overview": UserIntent.EXPLORE,
+            }
+            raw_intent = parsed.get("intent", "unknown").lower().strip()
+            intent = intent_map.get(raw_intent)
+            if intent is None:
+                # Fuzzy match: check if raw_intent starts with or contains a known key
+                for key, value in intent_map.items():
+                    if raw_intent.startswith(key) or key.startswith(raw_intent):
+                        intent = value
+                        break
+                else:
+                    intent = UserIntent.UNKNOWN
+            search_terms = parsed.get("search_terms", [])
+
+            return ExpandedQuery(
+                original_query=query,
+                intent=intent,
+                intent_confidence=parsed.get("confidence", 0.5),
+                expanded_terms=search_terms,
+                enhanced_query=query + " " + " ".join(search_terms) if search_terms else query,
+                context_additions={},
+                is_ambiguous=parsed.get("is_ambiguous", False),
+                ambiguity_hints=[],
+                confidence_score=parsed.get("confidence", 0.5),
+                suggested_clarifications=parsed.get("clarifications", []),
+            )
+        except Exception as e:
+            logger.debug(f"LLM query expansion failed, falling back to static: {e}")
+            return None
+
+    def _expand_static(
+        self, query: str, conversation: Optional[ConversationContext] = None
+    ) -> ExpandedQuery:
+        """Expand a user query with static rules (no LLM).
+
         Args:
             query: Original user query
             conversation: Optional conversation context

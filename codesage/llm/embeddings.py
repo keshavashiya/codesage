@@ -6,6 +6,7 @@ from typing import List, Optional
 from pathlib import Path
 import hashlib
 import json
+import re
 from collections import OrderedDict
 
 from langchain_ollama import OllamaEmbeddings
@@ -17,10 +18,56 @@ from codesage.utils.logging import get_logger
 
 logger = get_logger("llm.embeddings")
 
+# Embedding models that require an instruction prefix to avoid NaN on
+# multi-line or code inputs.  Maps model-name prefix → task instruction.
+_INSTRUCTION_MODELS = {
+    "qwen3-embedding": "Represent this text for retrieval: ",
+}
+
+
+def _needs_instruction_prefix(model_name: str) -> Optional[str]:
+    """Return the instruction prefix for models that need one, else None."""
+    for prefix, instruction in _INSTRUCTION_MODELS.items():
+        if model_name.startswith(prefix):
+            return instruction
+    return None
+
+
+class _InstructionEmbeddings(Embeddings):
+    """Wraps an Embeddings instance to prepend an instruction prefix.
+
+    Some embedding models (e.g. qwen3-embedding) produce NaN vectors when
+    given raw multi-line code without an instruction prefix.  This wrapper
+    transparently prepends the required prefix.
+    """
+
+    def __init__(self, delegate: Embeddings, instruction: str) -> None:
+        self._delegate = delegate
+        self._instruction = instruction
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        prefixed = [self._instruction + t for t in texts]
+        return self._delegate.embed_documents(prefixed)
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._delegate.embed_query(self._instruction + text)
+
 
 class EmbeddingError(Exception):
     """Base exception for embedding errors."""
     pass
+
+
+class EmbeddingModelError(EmbeddingError):
+    """Non-retryable model error (e.g. NaN output, invalid input)."""
+    pass
+
+
+# Patterns that indicate a deterministic model failure (never succeeds on retry)
+_NON_RETRYABLE_PATTERNS = re.compile(
+    r"NaN|unsupported value|invalid input|model not found",
+    re.IGNORECASE,
+)
 
 
 class EmbeddingService:
@@ -36,10 +83,11 @@ class EmbeddingService:
     """
 
     # Max characters to embed
+    # qwen3-embedding: 32K tokens (~96000 chars) — default model
     # mxbai-embed-large: 512 tokens (~1500 chars)
     # nomic-embed-text: 8192 tokens (~24000 chars)
-    # We use a conservative limit that works for most models
-    MAX_CHARS = 1500
+    # 8000 chars covers most functions/classes without being wasteful
+    MAX_CHARS = 8000
 
     def __init__(
         self,
@@ -65,12 +113,15 @@ class EmbeddingService:
         if self._cache_enabled and self.performance.embedding_cache_size > 0:
             self._memory_cache = _EmbeddingLRU(self.performance.embedding_cache_size)
 
-        # Create retry decorator based on config
+        # Create retry decorator based on config.
+        # EmbeddingModelError is excluded — it's a deterministic failure (NaN etc.)
+        # that will never succeed on retry.
         self._retry = retry_with_backoff(
             max_retries=config.max_retries,
             base_delay=1.0,
             max_delay=30.0,
             exceptions=(ConnectionError, TimeoutError, OSError, EmbeddingError),
+            exclude_exceptions=(EmbeddingModelError,),
             on_retry=lambda e, attempt: logger.warning(
                 f"Embedding call failed, retrying (attempt {attempt + 1}): {e}"
             ),
@@ -81,7 +132,7 @@ class EmbeddingService:
         # Note: OllamaEmbeddings doesn't directly support timeout param,
         # but the underlying httpx client respects system timeouts
         if self.config.provider == "ollama":
-            return OllamaEmbeddings(
+            base = OllamaEmbeddings(
                 model=self.config.embedding_model,
                 base_url=self.config.base_url,
             )
@@ -101,25 +152,75 @@ class EmbeddingService:
                 )
         else:
             # Default to Ollama for other providers
-            return OllamaEmbeddings(
+            base = OllamaEmbeddings(
                 model=self.config.embedding_model,
                 base_url=self.config.base_url or "http://localhost:11434",
             )
+
+        # Wrap with instruction prefix for models that need it (e.g. qwen3-embedding)
+        instruction = _needs_instruction_prefix(self.config.embedding_model)
+        if instruction:
+            logger.info(f"Using instruction prefix for {self.config.embedding_model}")
+            return _InstructionEmbeddings(base, instruction)
+        return base
 
     @property
     def embedder(self) -> Embeddings:
         """Get the underlying LangChain embedder."""
         return self._embedder
 
+    def get_dimension(self) -> int:
+        """Get the embedding vector dimension by probing the model.
+
+        Embeds a short test string and caches the result.
+
+        Returns:
+            Integer dimension of the embedding vectors.
+        """
+        if not hasattr(self, "_vector_dim"):
+            try:
+                vec = self._embedder.embed_query("dimension probe")
+                self._vector_dim = len(vec)
+                logger.info(f"Detected embedding dimension: {self._vector_dim}")
+            except Exception as e:
+                logger.warning(f"Failed to probe embedding dimension, defaulting to 4096: {e}")
+                self._vector_dim = 4096
+        return self._vector_dim
+
+    @staticmethod
+    def _sanitize(text: str) -> str:
+        """Sanitize text to prevent model errors (NaN, encoding issues).
+
+        Removes NUL bytes, control characters, and normalizes whitespace
+        that can cause embedding models to produce NaN output.
+
+        Args:
+            text: Raw text to sanitize
+
+        Returns:
+            Cleaned text safe for embedding
+        """
+        # Remove NUL bytes and other control characters (keep \n, \t, \r)
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        # Collapse runs of blank lines (>3 consecutive newlines → 2)
+        text = re.sub(r'\n{4,}', '\n\n\n', text)
+        # Strip leading/trailing whitespace
+        text = text.strip()
+        # Ensure non-empty (models can NaN on empty string)
+        if not text:
+            text = "empty"
+        return text
+
     def _truncate(self, text: str) -> str:
-        """Truncate text to fit within embedding model context.
+        """Sanitize and truncate text to fit within embedding model context.
 
         Args:
             text: Text to truncate
 
         Returns:
-            Truncated text
+            Cleaned, truncated text
         """
+        text = self._sanitize(text)
         if len(text) <= self.MAX_CHARS:
             return text
         # Truncate and add indicator
@@ -155,17 +256,25 @@ class EmbeddingService:
                     self._memory_cache.set(cache_key, cached)
                 return cached
 
-        # Generate embedding with retry
+        # Generate embedding with retry (skips retry for deterministic model errors)
         @self._retry
         def _generate_embedding():
             try:
                 return self._embedder.embed_query(text)
             except Exception as e:
+                error_str = str(e)
                 logger.error(f"Embedding generation failed: {e}")
+                # Don't retry deterministic model errors (NaN, invalid input)
+                if _NON_RETRYABLE_PATTERNS.search(error_str):
+                    raise EmbeddingModelError(
+                        f"Model error (not retryable): {e}"
+                    ) from e
                 raise EmbeddingError(f"Failed to generate embedding: {e}") from e
 
         try:
             embedding = _generate_embedding()
+        except EmbeddingModelError:
+            raise  # Don't wrap model errors further
         except Exception as e:
             logger.error(f"Embedding failed after retries: {e}")
             raise EmbeddingError(f"Embedding failed: {e}") from e
@@ -206,6 +315,11 @@ class EmbeddingService:
                 try:
                     return self._embedder.embed_documents(texts)
                 except Exception as e:
+                    error_str = str(e)
+                    if _NON_RETRYABLE_PATTERNS.search(error_str):
+                        raise EmbeddingModelError(
+                            f"Model error (not retryable): {e}"
+                        ) from e
                     raise EmbeddingError(f"Batch embedding failed: {e}") from e
             return _embed_all()
 
@@ -232,6 +346,11 @@ class EmbeddingService:
                 try:
                     return self._embedder.embed_documents(uncached_texts)
                 except Exception as e:
+                    error_str = str(e)
+                    if _NON_RETRYABLE_PATTERNS.search(error_str):
+                        raise EmbeddingModelError(
+                            f"Model error (not retryable): {e}"
+                        ) from e
                     raise EmbeddingError(f"Batch embedding failed: {e}") from e
 
             new_embeddings = _embed_uncached()

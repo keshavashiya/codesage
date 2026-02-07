@@ -1,5 +1,6 @@
 """Abstract base class for vector stores."""
 
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,10 +15,21 @@ class VectorStoreBase(ABC):
     """
 
     # Max characters for embedding (prevents context length errors)
-    MAX_CHARS = 1500
+    # qwen3-embedding supports 32K tokens; 8000 chars covers most code elements
+    MAX_CHARS = 8000
+
+    @staticmethod
+    def _sanitize(text: str) -> str:
+        """Remove characters that can cause embedding model errors (NaN)."""
+        # Remove NUL bytes and control characters (keep \n, \t, \r)
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        # Collapse excessive blank lines
+        text = re.sub(r'\n{4,}', '\n\n\n', text)
+        text = text.strip()
+        return text or "empty"
 
     def _truncate(self, text: str) -> str:
-        """Truncate text to fit embedding model context.
+        """Sanitize and truncate text to fit embedding model context.
 
         Uses smart truncation that tries to preserve:
         1. Function/class name and type
@@ -29,8 +41,10 @@ class VectorStoreBase(ABC):
             text: Text to truncate.
 
         Returns:
-            Truncated text.
+            Sanitized, truncated text.
         """
+        text = self._sanitize(text)
+
         if len(text) <= self.MAX_CHARS:
             return text
 

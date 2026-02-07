@@ -1,8 +1,9 @@
 """Chat engine for interactive code conversations."""
 
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
 from codesage.llm.provider import LLMProvider
 from codesage.storage.database import Database
@@ -36,6 +37,20 @@ from .query_expansion import (
 )
 
 logger = get_logger("chat.engine")
+
+
+@dataclass
+class _LLMStreamRequest:
+    """Returned by command handlers that want their LLM call streamed.
+
+    Instead of calling self.llm.chat(messages) directly, a handler
+    returns this object. The streaming framework then streams the
+    LLM response token-by-token.
+    """
+
+    messages: List[Dict[str, str]]
+    prefix: str = ""   # Text to show before LLM response
+    suffix: str = ""   # Text to append after LLM response
 
 
 class ChatEngine:
@@ -255,7 +270,14 @@ class ChatEngine:
 
         handler = handlers.get(parsed.command)
         if handler:
-            return handler(parsed)
+            result = handler(parsed)
+            # Resolve LLM stream requests in non-streaming mode
+            if isinstance(result, tuple) and len(result) == 2:
+                response, cont = result
+                if isinstance(response, _LLMStreamRequest):
+                    llm_response = self.llm.chat(response.messages)
+                    return response.prefix + llm_response + response.suffix, cont
+            return result
 
         # Regular message - process with LLM
         if parsed.command == ChatCommand.MESSAGE and parsed.args:
@@ -463,6 +485,236 @@ class ChatEngine:
             messages.append({"role": "user", "content": content})
 
         return messages
+
+    # =========================================================================
+    # Streaming Methods
+    # =========================================================================
+
+    def stream_message(
+        self, message: str
+    ) -> Generator[Tuple[str, str], None, None]:
+        """Stream a chat response with progressive context + LLM tokens.
+
+        Yields:
+            Tuples of (chunk_type, content):
+            - ("context", markdown_str) - Retrieved code context summary
+            - ("token", str) - Individual LLM response token
+            - ("done", full_response) - Complete response for session recording
+        """
+        # 1. Query expansion
+        yield ("status", "Analyzing your question...")
+        self._conversation_context.add_query(message)
+        expanded = self._query_expander.expand(message, self._conversation_context)
+
+        if expanded.is_ambiguous and expanded.confidence_score < 0.6:
+            yield ("done", self._generate_clarification_prompt(expanded))
+            return
+
+        # Context provider mode: return structured guidance (no streaming)
+        if self.config.features.context_provider_mode:
+            context = self.context_provider.get_implementation_context(
+                expanded.enhanced_query
+            )
+            yield ("done", self.context_provider.to_markdown(context))
+            return
+
+        self._session.add_user_message(message)
+
+        # 2. Build context
+        yield ("status", "Searching codebase...")
+        context = ""
+        code_refs = []
+        if self.include_context:
+            try:
+                context = self._build_mode_context(expanded.enhanced_query)
+                code_refs = self.context_builder.get_code_refs(
+                    expanded.enhanced_query, limit=5
+                )
+                self._update_conversation_context(code_refs, expanded)
+            except Exception as e:
+                logger.warning(f"Failed to build context: {e}")
+
+        # 3. Yield context summary so CLI can show it immediately
+        if code_refs:
+            context_summary = self._format_context_summary(code_refs)
+            yield ("context", context_summary)
+
+        # 4. Stream LLM response
+        messages = self._build_llm_messages(context)
+        full_response = []
+        try:
+            for token in self.llm.stream_chat(messages):
+                full_response.append(token)
+                yield ("token", token)
+        except Exception:
+            # Fallback to non-streaming
+            try:
+                response = self.llm.chat(messages)
+                full_response = [response]
+                yield ("token", response)
+            except Exception as e:
+                logger.error(f"LLM call failed: {e}")
+                full_response = [f"Sorry, I encountered an error: {e}"]
+                yield ("token", full_response[0])
+
+        # 5. Record complete response in session
+        complete = "".join(full_response)
+        self._session.add_assistant_message(complete, code_refs=code_refs)
+        yield ("done", complete)
+
+    # Commands that call LLM and should stream their response
+    _LLM_COMMANDS = {
+        ChatCommand.DEEP, ChatCommand.PLAN, ChatCommand.REVIEW,
+        ChatCommand.SECURITY, ChatCommand.IMPACT, ChatCommand.PATTERNS,
+        ChatCommand.SIMILAR,
+    }
+
+    # Status messages shown while gathering context for each command
+    _COMMAND_STATUS = {
+        ChatCommand.DEEP: "Running deep analysis...",
+        ChatCommand.PLAN: "Generating implementation plan...",
+        ChatCommand.REVIEW: "Reviewing code changes...",
+        ChatCommand.SECURITY: "Running security scan...",
+        ChatCommand.IMPACT: "Analyzing impact...",
+        ChatCommand.PATTERNS: "Loading patterns...",
+        ChatCommand.SIMILAR: "Searching for similar code...",
+    }
+
+    def _stream_llm_response(
+        self, messages: List[Dict[str, str]], collected: List[str]
+    ) -> Generator[Tuple[str, str], None, None]:
+        """Stream LLM response tokens. Appends chunks to collected list.
+
+        Args:
+            messages: LLM messages to send
+            collected: List to append tokens to (for building full response)
+
+        Yields:
+            ("token", chunk) tuples
+        """
+        try:
+            for token in self.llm.stream_chat(messages):
+                collected.append(token)
+                yield ("token", token)
+        except Exception:
+            # Fallback to non-streaming
+            response = self.llm.chat(messages)
+            collected.append(response)
+            yield ("token", response)
+
+    def process_input_stream(
+        self, user_input: str
+    ) -> Generator[Tuple[str, str], None, None]:
+        """Streaming version of process_input. Yields (chunk_type, content) tuples.
+
+        LLM-calling commands stream their responses progressively.
+        Simple commands yield a single ("done", response) tuple.
+        Yields ("exit", reason) if exiting.
+        """
+        parsed = self._parser.parse(user_input)
+
+        # Exit command
+        if parsed.command == ChatCommand.EXIT:
+            yield ("exit", "Goodbye!")
+            return
+
+        # LLM-calling commands: run handler but stream the LLM part
+        if parsed.command in self._LLM_COMMANDS:
+            yield from self._stream_command(parsed)
+            return
+
+        # Non-LLM commands: fast, no streaming needed
+        handler = self._get_command_handler(parsed)
+        if handler:
+            result = handler(parsed)
+            yield ("done", result)
+            return
+
+        # Regular messages are streamed
+        if parsed.command == ChatCommand.MESSAGE and parsed.args:
+            yield from self.stream_message(parsed.args)
+            return
+
+        yield ("done", "Please enter a message or command.")
+
+    def _stream_command(
+        self, parsed: ParsedCommand
+    ) -> Generator[Tuple[str, str], None, None]:
+        """Stream an LLM-calling command with status updates and token streaming.
+
+        If the handler returns an _LLMStreamRequest, streams the LLM
+        response token-by-token. Otherwise yields the result as-is.
+        """
+        status = self._COMMAND_STATUS.get(parsed.command, "Processing...")
+        yield ("status", status)
+
+        handler = self._get_command_handler(parsed)
+        if not handler:
+            yield ("done", "Unknown command.")
+            return
+
+        try:
+            result = handler(parsed)
+
+            if isinstance(result, _LLMStreamRequest):
+                # Stream the LLM response
+                yield ("status", "Generating response...")
+
+                collected = []
+                if result.prefix:
+                    collected.append(result.prefix)
+                    yield ("token", result.prefix)
+
+                yield from self._stream_llm_response(result.messages, collected)
+
+                if result.suffix:
+                    collected.append(result.suffix)
+                    yield ("token", result.suffix)
+
+                yield ("done", "".join(collected))
+            else:
+                # Non-LLM result (early return like "No changes found")
+                yield ("done", result)
+        except Exception as e:
+            yield ("done", f"Command failed: {e}")
+
+    def _get_command_handler(self, parsed: ParsedCommand):
+        """Get command handler for a parsed command, or None."""
+        handlers = {
+            ChatCommand.HELP: lambda _: self._handle_help(),
+            ChatCommand.CLEAR: lambda _: self._handle_clear(),
+            ChatCommand.STATS: lambda _: self._handle_stats(),
+            ChatCommand.CONTEXT: lambda p: self._handle_context(p.args),
+            ChatCommand.SEARCH: lambda p: self._handle_search(p.args),
+            ChatCommand.UNKNOWN: lambda _: "Unknown command. Type /help for available commands.",
+            ChatCommand.DEEP: lambda p: self._handle_deep(p.args),
+            ChatCommand.PLAN: lambda p: self._handle_plan(p.args),
+            ChatCommand.REVIEW: lambda p: self._handle_review(p.args),
+            ChatCommand.SECURITY: lambda p: self._handle_security(p.args),
+            ChatCommand.IMPACT: lambda p: self._handle_impact(p.args),
+            ChatCommand.PATTERNS: lambda p: self._handle_patterns(p.args),
+            ChatCommand.SIMILAR: lambda p: self._handle_similar(p.args),
+            ChatCommand.MODE: lambda p: self._handle_mode(p.args),
+            ChatCommand.EXPORT: lambda p: self._handle_export(p.args),
+        }
+        return handlers.get(parsed.command)
+
+    def _format_context_summary(self, code_refs: list) -> str:
+        """Format a brief context summary for streaming display."""
+        lines = ["**Found relevant code:**\n"]
+        for ref in code_refs[:5]:
+            if hasattr(ref, "file"):
+                file_str = str(ref.file)
+                line_str = str(getattr(ref, "line", "?"))
+                name_str = getattr(ref, "name", "?")
+            elif isinstance(ref, dict):
+                file_str = ref.get("file", "?")
+                line_str = str(ref.get("line", "?"))
+                name_str = ref.get("name", "?")
+            else:
+                continue
+            lines.append(f"- `{file_str}:{line_str}` - {name_str}")
+        return "\n".join(lines)
 
     # =========================================================================
     # Core Command Handlers
@@ -709,7 +961,6 @@ Please provide a thoughtful, conversational analysis that:
 
 Write in a friendly, professional tone as if explaining to a colleague. Avoid rigid section headers unless they truly help organize complex information."""
 
-            # Call LLM for natural language generation
             messages = [
                 {
                     "role": "system",
@@ -718,11 +969,11 @@ Write in a friendly, professional tone as if explaining to a colleague. Avoid ri
                 {"role": "user", "content": prompt},
             ]
 
-            response = self.llm.chat(messages)
-
-            # Add follow-up suggestion
-            output = f"## Analysis: {query}\n\n{response}\n\n---\n*Ask follow-up questions or use /plan to create an implementation plan.*"
-            return output
+            return _LLMStreamRequest(
+                messages=messages,
+                prefix=f"## Analysis: {query}\n\n",
+                suffix="\n\n---\n*Ask follow-up questions or use /plan to create an implementation plan.*",
+            )
 
         except Exception as e:
             logger.error(f"Deep analysis failed: {e}")
@@ -816,7 +1067,6 @@ Please provide a clear, actionable implementation plan that:
 
 Write in a practical, developer-friendly tone. Be specific about what needs to change and where."""
 
-            # Call LLM for natural language generation
             messages = [
                 {
                     "role": "system",
@@ -825,11 +1075,11 @@ Write in a practical, developer-friendly tone. Be specific about what needs to c
                 {"role": "user", "content": prompt},
             ]
 
-            response = self.llm.chat(messages)
-
-            # Add refinement suggestions
-            output = f"## Implementation Plan: {task}\n\n{response}\n\n---\n*Refine this plan with: add <requirement> | focus <file> | security | approve*"
-            return output
+            return _LLMStreamRequest(
+                messages=messages,
+                prefix=f"## Implementation Plan: {task}\n\n",
+                suffix="\n\n---\n*Refine this plan with: add <requirement> | focus <file> | security | approve*",
+            )
 
         except Exception as e:
             logger.error(f"Planning failed: {e}")
@@ -838,96 +1088,71 @@ Write in a practical, developer-friendly tone. Be specific about what needs to c
     def _handle_review(self, target: Optional[str]) -> str:
         """Handle /review command for code review."""
         try:
-            # If no target, review staged changes
-            review_target = target if target else "staged"
+            # If no target, review all uncommitted changes
+            review_target = target if target else "all changes"
 
             review_context = []
-            all_findings = []
 
             # Run the hybrid analyzer if available
             try:
                 from codesage.review.hybrid_analyzer import HybridReviewAnalyzer
 
-                analyzer = HybridReviewAnalyzer(self.config)
+                analyzer = HybridReviewAnalyzer(
+                    config=self.config,
+                    repo_path=self.config.project_path,
+                )
 
-                if review_target == "staged":
-                    result = analyzer.review_staged_changes()
+                # Get changes
+                if target:
+                    all_changes = analyzer.get_all_changes()
+                    changes = [c for c in all_changes if str(c.path) == target]
+                    if not changes:
+                        return f"No uncommitted changes found for: {target}"
                 else:
-                    result = analyzer.review_file(Path(review_target))
+                    changes = analyzer.get_all_changes()
 
+                if not changes:
+                    return "No uncommitted changes found. Make some changes and try again."
+
+                # Run review
+                result = analyzer.review_changes(
+                    changes=changes,
+                    use_llm_synthesis=False,
+                )
                 self._last_review = result
 
-                # Collect all findings for LLM analysis
-                if result.get("findings"):
-                    review_context.append(f"## Code Review: {review_target}\n")
+                # Build review context from ReviewResult
+                review_context.append(f"## Code Review: {review_target}\n")
+                review_context.append(f"**Summary:** {result.summary}\n")
 
-                    # Group findings by severity and type
-                    critical = []
-                    high = []
-                    medium = []
-                    low = []
+                if result.issues:
+                    # Group by severity
+                    critical = [i for i in result.issues if i.severity.name == "CRITICAL"]
+                    warning = [i for i in result.issues if i.severity.name == "WARNING"]
+                    info = [i for i in result.issues if i.severity.name not in ("CRITICAL", "WARNING")]
 
-                    for finding in result["findings"]:
-                        finding_info = {
-                            "title": finding.get("title", "Issue"),
-                            "description": finding.get("description", ""),
-                            "file": finding.get("file"),
-                            "line": finding.get("line"),
-                            "severity": finding.get("severity", "info"),
-                            "type": finding.get("type", "static"),
-                        }
-                        all_findings.append(finding_info)
-
-                        severity = finding.get("severity", "info")
-                        if severity == "critical":
-                            critical.append(finding_info)
-                        elif severity == "high":
-                            high.append(finding_info)
-                        elif severity == "medium":
-                            medium.append(finding_info)
-                        else:
-                            low.append(finding_info)
-
-                    # Add findings to context
                     if critical:
-                        review_context.append(
-                            f"### Critical Issues ({len(critical)})\n"
-                        )
-                        for f in critical[:5]:
-                            review_context.append(f"- **{f['title']}**")
-                            if f["file"]:
-                                review_context.append(
-                                    f"  Location: `{f['file']}:{f['line']}`"
-                                )
-                            if f["description"]:
-                                review_context.append(f"  {f['description'][:100]}\n")
+                        review_context.append(f"\n### Critical ({len(critical)})\n")
+                        for issue in critical[:5]:
+                            review_context.append(f"- **{issue.message}**")
+                            if issue.file:
+                                review_context.append(f"  `{issue.file}:{issue.line}`")
+                            if issue.suggestion:
+                                review_context.append(f"  Fix: {issue.suggestion[:100]}\n")
 
-                    if high:
-                        review_context.append(f"\n### High Priority ({len(high)})\n")
-                        for f in high[:5]:
-                            review_context.append(f"- **{f['title']}**")
-                            if f["file"]:
-                                review_context.append(f"  `{f['file']}:{f['line']}`")
+                    if warning:
+                        review_context.append(f"\n### Warnings ({len(warning)})\n")
+                        for issue in warning[:5]:
+                            review_context.append(f"- {issue.message}")
+                            if issue.file:
+                                review_context.append(f"  `{issue.file}:{issue.line}`")
 
-                    if medium:
-                        review_context.append(
-                            f"\n### Medium Priority ({len(medium)})\n"
-                        )
-                        for f in medium[:3]:
-                            review_context.append(f"- {f['title']}")
-
-                    if low:
-                        review_context.append(
-                            f"\n### Low Priority ({len(low)} items)\n"
-                        )
+                    if info:
+                        review_context.append(f"\n### Info ({len(info)})\n")
+                        for issue in info[:3]:
+                            review_context.append(f"- {issue.message}")
                 else:
-                    review_context.append(
-                        f"## Code Review: {review_target}\n\nNo issues found! ✓\n"
-                    )
-
-                # Add summary if available
-                if result.get("summary"):
-                    review_context.append(f"\n### Summary\n{result['summary']}\n")
+                    review_context.append("\nNo issues found!\n")
 
             except ImportError:
                 review_context.append(
@@ -954,7 +1179,6 @@ Please provide a constructive code review that:
 
 Write in a helpful, professional tone. Be specific about file locations and line numbers."""
 
-            # Call LLM for natural language generation
             messages = [
                 {
                     "role": "system",
@@ -963,8 +1187,7 @@ Write in a helpful, professional tone. Be specific about file locations and line
                 {"role": "user", "content": prompt},
             ]
 
-            response = self.llm.chat(messages)
-            return response
+            return _LLMStreamRequest(messages=messages)
 
         except Exception as e:
             logger.error(f"Review failed: {e}")
@@ -974,77 +1197,68 @@ Write in a helpful, professional tone. Be specific about file locations and line
         """Handle /security command for security analysis."""
         try:
             from codesage.security.scanner import SecurityScanner
+            from codesage.security.models import Severity
 
-            scanner = SecurityScanner(self.config.security)
+            scanner = SecurityScanner()
 
             if target:
                 path = Path(target)
+                if not path.is_absolute():
+                    path = self.config.project_path / path
                 if path.exists():
-                    findings = scanner.scan_file(path)
+                    finding_list = scanner.scan_file(path)
                 else:
                     return f"Path not found: {target}"
             else:
-                findings = scanner.scan_directory(self.config.project_path)
+                report = scanner.scan_directory(self.config.project_path)
+                finding_list = report.findings
 
             # Build security context for LLM
             security_context = []
 
-            if findings:
+            if finding_list:
                 security_context.append(
                     f"## Security Analysis: {target or 'Project'}\n"
                 )
 
                 # Group by severity
-                critical = [
-                    f for f in findings if getattr(f, "severity", "") == "critical"
-                ]
-                high = [f for f in findings if getattr(f, "severity", "") == "high"]
-                medium = [f for f in findings if getattr(f, "severity", "") == "medium"]
-                low = [f for f in findings if getattr(f, "severity", "") == "low"]
+                critical = [f for f in finding_list if f.severity == Severity.CRITICAL]
+                high = [f for f in finding_list if f.severity == Severity.HIGH]
+                medium = [f for f in finding_list if f.severity == Severity.MEDIUM]
+                low = [f for f in finding_list if f.severity == Severity.LOW]
 
                 if critical:
                     security_context.append(
                         f"\n### Critical Issues ({len(critical)})\n"
                     )
                     for f in critical[:5]:
-                        rule_id = getattr(f, "rule_id", "Unknown")
-                        msg = getattr(f, "message", "")
-                        file_path = getattr(f, "file", "Unknown")
-                        line = getattr(f, "line", "")
-                        security_context.append(f"- **{rule_id}**: {msg[:100]}")
-                        security_context.append(f"  Location: `{file_path}:{line}`\n")
+                        security_context.append(f"- **{f.rule.id}**: {f.rule.message[:100]}")
+                        security_context.append(f"  Location: `{f.file}:{f.line_number}`\n")
 
                 if high:
                     security_context.append(
                         f"\n### High Priority Issues ({len(high)})\n"
                     )
                     for f in high[:5]:
-                        rule_id = getattr(f, "rule_id", "Unknown")
-                        msg = getattr(f, "message", "")
-                        file_path = getattr(f, "file", "Unknown")
-                        security_context.append(f"- **{rule_id}**: {msg[:80]}")
-                        security_context.append(
-                            f"  `{file_path}:{getattr(f, 'line', '')}`\n"
-                        )
+                        security_context.append(f"- **{f.rule.id}**: {f.rule.message[:80]}")
+                        security_context.append(f"  `{f.file}:{f.line_number}`\n")
 
                 if medium:
                     security_context.append(
                         f"\n### Medium Priority Issues ({len(medium)})\n"
                     )
                     for f in medium[:3]:
-                        rule_id = getattr(f, "rule_id", "Unknown")
-                        msg = getattr(f, "message", "")
-                        security_context.append(f"- {rule_id}: {msg[:60]}\n")
+                        security_context.append(f"- {f.rule.id}: {f.rule.message[:60]}\n")
 
                 if low:
                     security_context.append(
                         f"\n### Low Priority ({len(low)} findings)\n"
                     )
 
-                security_context.append(f"\n**Total findings: {len(findings)}**\n")
+                security_context.append(f"\n**Total findings: {len(finding_list)}**\n")
             else:
                 security_context.append(
-                    f"## Security Analysis: {target or 'Project'}\n\nNo security issues found! ✓\n"
+                    f"## Security Analysis: {target or 'Project'}\n\nNo security issues found!\n"
                 )
 
             # Build prompt for LLM
@@ -1067,7 +1281,6 @@ Please provide a security assessment that:
 
 Write in a clear, actionable tone. Focus on practical remediation."""
 
-            # Call LLM for natural language generation
             messages = [
                 {
                     "role": "system",
@@ -1076,8 +1289,7 @@ Write in a clear, actionable tone. Focus on practical remediation."""
                 {"role": "user", "content": prompt},
             ]
 
-            response = self.llm.chat(messages)
-            return response
+            return _LLMStreamRequest(messages=messages)
 
         except ImportError:
             return "Security scanner not available. Run `codesage review` from CLI for full analysis."
@@ -1178,7 +1390,6 @@ Please provide an impact analysis that:
 
 Write in a clear, actionable tone suitable for developers planning changes."""
 
-            # Call LLM for natural language generation
             messages = [
                 {
                     "role": "system",
@@ -1187,8 +1398,7 @@ Write in a clear, actionable tone suitable for developers planning changes."""
                 {"role": "user", "content": prompt},
             ]
 
-            response = self.llm.chat(messages)
-            return response
+            return _LLMStreamRequest(messages=messages)
 
         except Exception as e:
             logger.error(f"Impact analysis failed: {e}")
@@ -1252,7 +1462,6 @@ Please provide an analysis that:
 
 Write in an informative tone that helps developers understand and adopt these patterns."""
 
-            # Call LLM for natural language generation
             messages = [
                 {
                     "role": "system",
@@ -1261,8 +1470,7 @@ Write in an informative tone that helps developers understand and adopt these pa
                 {"role": "user", "content": prompt},
             ]
 
-            response = self.llm.chat(messages)
-            return response
+            return _LLMStreamRequest(messages=messages)
 
         except Exception as e:
             logger.warning(f"Could not load patterns: {e}")
@@ -1331,7 +1539,6 @@ Please provide an analysis that:
 
 Write in a practical, developer-friendly tone focused on code quality and maintainability."""
 
-            # Call LLM for natural language generation
             messages = [
                 {
                     "role": "system",
@@ -1340,8 +1547,7 @@ Write in a practical, developer-friendly tone focused on code quality and mainta
                 {"role": "user", "content": prompt},
             ]
 
-            response = self.llm.chat(messages)
-            return response
+            return _LLMStreamRequest(messages=messages)
 
         except Exception as e:
             logger.error(f"Similar search failed: {e}")
@@ -1385,6 +1591,11 @@ Write in a practical, developer-friendly tone focused on code quality and mainta
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"chat_export_{timestamp}.md"
 
+        # Check if there's any conversation to export
+        user_msgs = [m for m in self._session.messages if m.role in ("user", "assistant")]
+        if not user_msgs:
+            return "No conversation to export yet. Start chatting first!"
+
         try:
             output_path = self.config.project_path / filename
 
@@ -1392,6 +1603,7 @@ Write in a practical, developer-friendly tone focused on code quality and mainta
                 f"# Chat Export - {self.config.project_name}",
                 f"*Exported: {datetime.now().isoformat()}*",
                 f"*Mode: {self._mode.value}*",
+                f"*Messages: {len(user_msgs)}*",
                 "",
                 "---",
                 "",
@@ -1400,11 +1612,14 @@ Write in a practical, developer-friendly tone focused on code quality and mainta
             for msg in self._session.messages:
                 if msg.role == "system":
                     continue
-                role_label = "**You:**" if msg.role == "user" else "**CodeSage:**"
-                lines.append(f"{role_label}\n{msg.content}\n")
+                if msg.role == "user":
+                    lines.append(f"## You\n\n{msg.content}\n")
+                else:
+                    lines.append(f"## CodeSage\n\n{msg.content}\n")
+                lines.append("---\n")
 
             output_path.write_text("\n".join(lines))
-            return f"Conversation exported to: `{output_path}`"
+            return f"Conversation exported ({len(user_msgs)} messages) to: `{output_path}`"
 
         except Exception as e:
             return f"Export failed: {e}"

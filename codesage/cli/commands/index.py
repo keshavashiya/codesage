@@ -91,6 +91,10 @@ def index(
     if not incremental:
         console.print("[dim]Running full reindex...[/dim]")
 
+    # Hint for first-time users
+    if not config.storage.db_path.exists():
+        console.print("[dim]First-time indexing includes embedding generation (may take a moment)...[/dim]")
+
     indexer = Indexer(config)
 
     # Override memory learning if explicitly set
@@ -144,8 +148,12 @@ def index(
     )
 
     if stats["elements_found"] > 0:
-        print_success("Ready for suggestions!")
-        console.print("  Try: [cyan]codesage suggest 'your query'[/cyan]\n")
+        print_success("Indexing complete! Ready to chat.")
+        console.print("  Try: [cyan]codesage chat[/cyan]\n")
+    elif stats["files_skipped"] > 0 and stats["files_indexed"] == 0:
+        # All files unchanged — index already up to date
+        print_success("Index is up to date. No changes detected.")
+        console.print("  Try: [cyan]codesage chat[/cyan]\n")
     else:
         print_warning("No code elements found.")
         # Check if non-Python files were scanned but no parser is available

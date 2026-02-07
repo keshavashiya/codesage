@@ -30,6 +30,7 @@ def retry_with_backoff(
     exponential_base: float = 2.0,
     jitter: bool = True,
     exceptions: Tuple[Type[Exception], ...] = (Exception,),
+    exclude_exceptions: Tuple[Type[Exception], ...] = (),
     on_retry: Optional[Callable[[Exception, int], None]] = None,
 ):
     """Decorator for retry with exponential backoff.
@@ -44,6 +45,7 @@ def retry_with_backoff(
         exponential_base: Base for exponential calculation (default: 2.0)
         jitter: Add random jitter to delay to prevent thundering herd
         exceptions: Tuple of exception types to catch and retry
+        exclude_exceptions: Tuple of exception types to never retry (re-raised immediately)
         on_retry: Optional callback called on each retry (exception, attempt)
 
     Example:
@@ -61,6 +63,8 @@ def retry_with_backoff(
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
+                except exclude_exceptions:
+                    raise  # Never retry these
                 except exceptions as e:
                     last_exception = e
 

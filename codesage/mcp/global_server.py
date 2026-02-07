@@ -2,6 +2,7 @@
 
 This server operates at the ~/.codesage/ level and can access any indexed project.
 Tools accept a project_name or project_path parameter to target specific projects.
+All project-level tools are available here — specify project_name to use them.
 """
 
 import json
@@ -27,12 +28,19 @@ except ImportError:
 class GlobalCodeSageMCPServer:
     """Global MCP server for all CodeSage projects.
 
-    Provides tools that work across all indexed projects:
-    - search_code: Search any project or all projects
+    Provides all tools across all indexed projects:
     - list_projects: Get all indexed projects
+    - search_code: Search any project or all projects
     - get_file_context: Get code from any project
-    - analyze_security: Run security scan on any project
     - get_stats: Get stats for any project or global stats
+    - get_developer_profile: Developer preferences and learned patterns
+    - review_code: AI code review on any project
+    - analyze_security: Security scanning on any project
+    - explain_concept: LLM-synthesized concept explanation
+    - suggest_approach: Implementation guidance with patterns
+    - trace_flow: Call chain tracing through dependency graph
+    - find_examples: Usage example search grouped by pattern
+    - recommend_pattern: Cross-project pattern recommendations
     """
 
     def __init__(self, global_dir: Optional[Path] = None):
@@ -57,6 +65,9 @@ class GlobalCodeSageMCPServer:
         # Lazy-loaded global services
         self._memory_manager = None
 
+        # Cache project-level MCP servers for delegation
+        self._project_servers: Dict[str, Any] = {}
+
         self._initialize_server()
 
     @property
@@ -66,6 +77,55 @@ class GlobalCodeSageMCPServer:
             from codesage.memory.memory_manager import MemoryManager
             self._memory_manager = MemoryManager(global_dir=self.global_dir / "developer")
         return self._memory_manager
+
+    def _get_project_server(self, project_name: str):
+        """Get or create a cached project-level MCP server.
+
+        Args:
+            project_name: Name of the project.
+
+        Returns:
+            CodeSageMCPServer instance for the project.
+
+        Raises:
+            ValueError: If project not found.
+        """
+        if project_name in self._project_servers:
+            return self._project_servers[project_name]
+
+        project_path = self._projects.get(project_name)
+        if not project_path:
+            raise ValueError(f"Project not found: {project_name}")
+
+        from codesage.mcp.server import CodeSageMCPServer
+        server = CodeSageMCPServer(project_path)
+        self._project_servers[project_name] = server
+        return server
+
+    def _resolve_project(self, args: Dict[str, Any]) -> str:
+        """Resolve project_name from args, raising clear error if missing.
+
+        Args:
+            args: Tool arguments dict.
+
+        Returns:
+            project_name string.
+
+        Raises:
+            ValueError: If project_name not provided or project not found.
+        """
+        project_name = args.get("project_name")
+        if not project_name:
+            available = ", ".join(self._projects.keys()) if self._projects else "none"
+            raise ValueError(
+                f"project_name is required. Available projects: {available}"
+            )
+        if project_name not in self._projects:
+            available = ", ".join(self._projects.keys()) if self._projects else "none"
+            raise ValueError(
+                f"Project not found: {project_name}. Available projects: {available}"
+            )
+        return project_name
 
     def _initialize_server(self):
         # Create MCP server
@@ -97,15 +157,7 @@ class GlobalCodeSageMCPServer:
         logger.info(f"Discovered {len(self._projects)} projects")
 
     def _get_project_path(self, project_name: Optional[str] = None, project_path: Optional[str] = None) -> Optional[Path]:
-        """Get project path from name or path parameter.
-
-        Args:
-            project_name: Project name
-            project_path: Project path
-
-        Returns:
-            Path to project or None if not found
-        """
+        """Get project path from name or path parameter."""
         if project_path:
             path = Path(project_path).resolve()
             if (path / ".codesage").exists():
@@ -117,13 +169,24 @@ class GlobalCodeSageMCPServer:
 
         return None
 
+    # =========================================================================
+    # Tool Registration
+    # =========================================================================
+
     def _register_tools(self) -> None:
         """Register all MCP tools."""
+
+        # Common project_name property for tool schemas
+        _project_name_prop = {
+            "type": "string",
+            "description": "Project name (required for project-specific tools)",
+        }
 
         @self.server.list_tools()
         async def list_tools() -> List[Tool]:
             """List available tools."""
             return [
+                # --- Global-only tools ---
                 Tool(
                     name="list_projects",
                     description="List all indexed CodeSage projects",
@@ -133,8 +196,21 @@ class GlobalCodeSageMCPServer:
                     },
                 ),
                 Tool(
+                    name="get_developer_profile",
+                    description="Get developer profile: preferences, coding style, and learned patterns.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                ),
+                # --- Cross-project tools ---
+                Tool(
                     name="search_code",
-                    description="Search code across one or all projects using semantic search",
+                    description=(
+                        "Search code across one or all projects using semantic search. "
+                        "Returns matching snippets with file locations, similarity scores, "
+                        "and confidence tiers."
+                    ),
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -162,14 +238,14 @@ class GlobalCodeSageMCPServer:
                 ),
                 Tool(
                     name="get_file_context",
-                    description="Get content of a specific file with optional line range",
+                    description=(
+                        "Get content of a specific file with definitions, security issues, "
+                        "and related code context."
+                    ),
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "project_name": {
-                                "type": "string",
-                                "description": "Project name",
-                            },
+                            "project_name": _project_name_prop,
                             "file_path": {
                                 "type": "string",
                                 "description": "Path to file (relative to project root)",
@@ -204,12 +280,192 @@ class GlobalCodeSageMCPServer:
                         },
                     },
                 ),
+                # --- Project tools (delegated to project server) ---
                 Tool(
-                    name="get_developer_profile",
-                    description="Get developer profile: preferences, coding style, and learned patterns.",
+                    name="review_code",
+                    description=(
+                        "Review code changes for bugs, security issues, code smells, "
+                        "and improvements. Runs hybrid analysis on staged/uncommitted "
+                        "changes or a specific file."
+                    ),
                     inputSchema={
                         "type": "object",
-                        "properties": {},
+                        "properties": {
+                            "project_name": _project_name_prop,
+                            "file_path": {
+                                "type": "string",
+                                "description": "Specific file to review (optional)",
+                            },
+                            "staged_only": {
+                                "type": "boolean",
+                                "description": "Review only staged changes",
+                                "default": False,
+                            },
+                            "use_llm": {
+                                "type": "boolean",
+                                "description": "Use LLM for deeper insights",
+                                "default": True,
+                            },
+                        },
+                        "required": ["project_name"],
+                    },
+                ),
+                Tool(
+                    name="analyze_security",
+                    description=(
+                        "Scan code for security vulnerabilities. Detects injection flaws, "
+                        "auth issues, secrets exposure, insecure crypto, and misconfigurations."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project_name": _project_name_prop,
+                            "path": {
+                                "type": "string",
+                                "description": "Specific path to analyze (default: entire project)",
+                                "default": ".",
+                            },
+                            "severity": {
+                                "type": "string",
+                                "description": "Minimum severity level: low, medium, high, critical",
+                                "default": "low",
+                            },
+                        },
+                        "required": ["project_name"],
+                    },
+                ),
+                Tool(
+                    name="explain_concept",
+                    description=(
+                        "Understand how a concept, pattern, or feature is implemented "
+                        "in a project. Performs semantic search and synthesizes a "
+                        "narrative explanation using LLM."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project_name": _project_name_prop,
+                            "concept": {
+                                "type": "string",
+                                "description": "The concept, pattern, or feature to explain",
+                            },
+                            "depth": {
+                                "type": "string",
+                                "enum": ["quick", "medium", "thorough"],
+                                "default": "medium",
+                                "description": "How deeply to analyze the concept",
+                            },
+                        },
+                        "required": ["project_name", "concept"],
+                    },
+                ),
+                Tool(
+                    name="suggest_approach",
+                    description=(
+                        "Get implementation guidance for a coding task. Returns relevant "
+                        "code, learned patterns, cross-project recommendations, security "
+                        "notes, and suggested files to modify."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project_name": _project_name_prop,
+                            "task": {
+                                "type": "string",
+                                "description": "Description of what you want to implement",
+                            },
+                            "target_files": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional target files to focus on",
+                            },
+                            "include_cross_project": {
+                                "type": "boolean",
+                                "description": "Include patterns from other projects",
+                                "default": False,
+                            },
+                        },
+                        "required": ["project_name", "task"],
+                    },
+                ),
+                Tool(
+                    name="trace_flow",
+                    description=(
+                        "Trace how code flows through the codebase. Finds a code element "
+                        "by name, then traces callers, callees, and transitive call chains "
+                        "using the dependency graph."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project_name": _project_name_prop,
+                            "element_name": {
+                                "type": "string",
+                                "description": "Name of the function, method, or class to trace",
+                            },
+                            "direction": {
+                                "type": "string",
+                                "enum": ["callers", "callees", "both"],
+                                "default": "both",
+                                "description": "Direction to trace",
+                            },
+                            "max_depth": {
+                                "type": "integer",
+                                "description": "Maximum depth for transitive tracing",
+                                "default": 3,
+                            },
+                        },
+                        "required": ["project_name", "element_name"],
+                    },
+                ),
+                Tool(
+                    name="find_examples",
+                    description=(
+                        "Find usage examples of a pattern, function, or coding style. "
+                        "Groups results by directory/pattern variation."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project_name": _project_name_prop,
+                            "pattern": {
+                                "type": "string",
+                                "description": "The pattern, function name, or coding style to find",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum total examples to return",
+                                "default": 10,
+                            },
+                        },
+                        "required": ["project_name", "pattern"],
+                    },
+                ),
+                Tool(
+                    name="recommend_pattern",
+                    description=(
+                        "Get pattern recommendations from the developer's learned patterns "
+                        "and cross-project memory. Returns matching patterns with code "
+                        "examples and confidence scores."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project_name": {
+                                "type": "string",
+                                "description": "Optional: Get project-specific patterns too",
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "What you're trying to do or the kind of pattern you need",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum patterns to return",
+                                "default": 5,
+                            },
+                        },
+                        "required": ["context"],
                     },
                 ),
             ]
@@ -218,16 +474,28 @@ class GlobalCodeSageMCPServer:
         async def call_tool(name: str, arguments: Any) -> CallToolResult:
             """Handle tool calls."""
             try:
+                args = arguments or {}
+
+                # Global-only tools
                 if name == "list_projects":
-                    result = await self._tool_list_projects(arguments or {})
-                elif name == "search_code":
-                    result = await self._tool_search_code(arguments or {})
-                elif name == "get_file_context":
-                    result = await self._tool_get_file_context(arguments or {})
-                elif name == "get_stats":
-                    result = await self._tool_get_stats(arguments or {})
+                    result = await self._tool_list_projects(args)
                 elif name == "get_developer_profile":
-                    result = await self._tool_get_developer_profile(arguments or {})
+                    result = await self._tool_get_developer_profile(args)
+                # Cross-project tools (own implementation)
+                elif name == "search_code":
+                    result = await self._tool_search_code(args)
+                elif name == "get_stats":
+                    result = await self._tool_get_stats(args)
+                # Project-delegated tools (with own file context handler)
+                elif name == "get_file_context":
+                    result = await self._tool_get_file_context(args)
+                # Project-delegated tools
+                elif name in (
+                    "review_code", "analyze_security", "explain_concept",
+                    "suggest_approach", "trace_flow", "find_examples",
+                    "recommend_pattern",
+                ):
+                    result = await self._delegate_to_project(name, args)
                 else:
                     result = {"error": f"Unknown tool: {name}"}
 
@@ -250,6 +518,46 @@ class GlobalCodeSageMCPServer:
                         )
                     ]
                 )
+
+    # =========================================================================
+    # Project Delegation
+    # =========================================================================
+
+    async def _delegate_to_project(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Delegate a tool call to a project-level MCP server.
+
+        Args:
+            tool_name: Name of the tool to call.
+            args: Tool arguments (must include project_name).
+
+        Returns:
+            Tool result dict.
+        """
+        project_name = self._resolve_project(args)
+        server = self._get_project_server(project_name)
+
+        # Map tool names to project server handler methods
+        handler_map = {
+            "review_code": server._tool_review_code,
+            "analyze_security": server._tool_analyze_security,
+            "explain_concept": server._tool_explain_concept,
+            "suggest_approach": server._tool_suggest_approach,
+            "trace_flow": server._tool_trace_flow,
+            "find_examples": server._tool_find_examples,
+            "recommend_pattern": server._tool_recommend_pattern,
+        }
+
+        handler = handler_map.get(tool_name)
+        if not handler:
+            return {"error": f"No handler for tool: {tool_name}"}
+
+        # Remove project_name from args before delegating (project server doesn't expect it)
+        project_args = {k: v for k, v in args.items() if k != "project_name"}
+        return await handler(project_args)
+
+    # =========================================================================
+    # Resources
+    # =========================================================================
 
     def _register_resources(self) -> None:
         """Register MCP resources."""
@@ -401,6 +709,10 @@ class GlobalCodeSageMCPServer:
 
             return json.dumps({"error": "Unknown resource"})
 
+    # =========================================================================
+    # Global-only Tool Handlers
+    # =========================================================================
+
     async def _tool_list_projects(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List all projects tool."""
         projects = []
@@ -421,7 +733,12 @@ class GlobalCodeSageMCPServer:
         return {"projects": projects, "count": len(projects)}
 
     async def _tool_search_code(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Search code across projects."""
+        """Search code across projects.
+
+        When project_name is specified, delegates to the project server
+        for envelope-format results with confidence scoring.
+        When omitted, searches across all projects.
+        """
         query = args.get("query", "")
         project_name = args.get("project_name")
         limit = args.get("limit", 5)
@@ -430,18 +747,17 @@ class GlobalCodeSageMCPServer:
         if not query:
             return {"error": "Query is required"}
 
-        results = []
-
-        # Search specific project or all projects
-        projects_to_search = {}
+        # Single-project search: delegate to project server for full envelope
         if project_name:
-            path = self._projects.get(project_name)
-            if path:
-                projects_to_search[project_name] = path
-        else:
-            projects_to_search = self._projects
+            try:
+                server = self._get_project_server(project_name)
+                return await server._tool_search_code(args)
+            except ValueError as e:
+                return {"error": str(e)}
 
-        for name, path in projects_to_search.items():
+        # Multi-project search
+        results = []
+        for name, path in self._projects.items():
             try:
                 config = Config.load(path)
                 from codesage.core.suggester import Suggester
@@ -454,9 +770,10 @@ class GlobalCodeSageMCPServer:
                     include_explanations=False,
                 )
 
-                for result in project_results:
-                    result["project"] = name
-                    results.append(result)
+                for suggestion in project_results:
+                    result_dict = suggestion.to_dict()
+                    result_dict["project"] = name
+                    results.append(result_dict)
 
             except Exception as e:
                 logger.warning(f"Failed to search {name}: {e}")
@@ -471,41 +788,22 @@ class GlobalCodeSageMCPServer:
         return {"query": query, "count": len(results), "results": results}
 
     async def _tool_get_file_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Get file context from a project."""
+        """Get file context from a project.
+
+        Delegates to project server for enriched results (definitions, security).
+        """
         project_name = args.get("project_name")
         file_path = args.get("file_path")
-        line_start = args.get("line_start")
-        line_end = args.get("line_end")
 
         if not project_name or not file_path:
             return {"error": "project_name and file_path are required"}
 
-        project_path = self._projects.get(project_name)
-        if not project_path:
-            return {"error": f"Project not found: {project_name}"}
-
-        full_path = project_path / file_path
-        if not full_path.exists():
-            return {"error": f"File not found: {file_path}"}
-
         try:
-            with open(full_path, "r") as f:
-                lines = f.readlines()
-
-            if line_start is not None and line_end is not None:
-                lines = lines[line_start - 1:line_end]
-                content = "".join(lines)
-            else:
-                content = "".join(lines)
-
-            return {
-                "project": project_name,
-                "file": file_path,
-                "line_start": line_start or 1,
-                "line_count": len(lines),
-                "content": content,
-            }
-        except Exception as e:
+            server = self._get_project_server(project_name)
+            # Delegate — project server returns envelope with definitions + security
+            project_args = {k: v for k, v in args.items() if k != "project_name"}
+            return await server._tool_get_file_context(project_args)
+        except ValueError as e:
             return {"error": str(e)}
 
     async def _tool_get_stats(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -514,23 +812,11 @@ class GlobalCodeSageMCPServer:
         detailed = args.get("detailed", False)
 
         if project_name:
-            # Get stats for specific project
-            project_path = self._projects.get(project_name)
-            if not project_path:
-                return {"error": f"Project not found: {project_name}"}
-
+            # Delegate to project server for envelope format
             try:
-                config = Config.load(project_path)
-                from codesage.storage.database import Database
-                db = Database(config.storage.db_path)
-                stats = db.get_stats()
-
-                return {
-                    "project": project_name,
-                    "path": str(project_path),
-                    **stats,
-                }
-            except Exception as e:
+                server = self._get_project_server(project_name)
+                return await server._tool_get_stats(args)
+            except ValueError as e:
                 return {"error": str(e)}
         else:
             # Get global stats
@@ -558,10 +844,9 @@ class GlobalCodeSageMCPServer:
         """Get developer profile (preferences and patterns)."""
         try:
             # 1. Get all preferences
-            preferences = self.memory.get_all_preferences(category=None) # All categories
+            preferences = self.memory.get_all_preferences(category=None)
 
             # 2. Get top cross-project patterns
-            # These are patterns that appear in multiple projects, indicating a core style
             patterns = self.memory.get_cross_project_patterns(min_projects=2)
 
             # Format patterns
@@ -583,6 +868,10 @@ class GlobalCodeSageMCPServer:
         except Exception as e:
             return {"error": f"Failed to load profile: {e}"}
 
+    # =========================================================================
+    # Server Transports
+    # =========================================================================
+
     async def run_stdio(self) -> None:
         """Run the MCP server on stdio."""
         logger.info("Starting Global CodeSage MCP Server (stdio transport)...")
@@ -597,7 +886,11 @@ class GlobalCodeSageMCPServer:
     async def run_sse(self, host: str = "localhost", port: int = 8080) -> None:
         """Run the MCP server with HTTP/SSE transport."""
         try:
-            from mcp.server.sse import sse_server
+            from mcp.server.sse import SseServerTransport
+            from starlette.applications import Starlette
+            from starlette.responses import Response
+            from starlette.routing import Mount, Route
+            import uvicorn
         except ImportError:
             logger.error(
                 "SSE transport requires additional dependencies. "
@@ -609,9 +902,28 @@ class GlobalCodeSageMCPServer:
         logger.info(f"Server endpoint: http://{host}:{port}/sse")
         logger.info(f"Serving {len(self._projects)} projects")
 
-        async with sse_server(host=host, port=port) as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                self.server.create_initialization_options(),
-            )
+        sse = SseServerTransport("/messages/")
+
+        async def handle_sse(request):
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await self.server.run(
+                    streams[0],
+                    streams[1],
+                    self.server.create_initialization_options(),
+                )
+            return Response()
+
+        starlette_app = Starlette(
+            routes=[
+                Route("/sse", endpoint=handle_sse),
+                Mount("/messages/", app=sse.handle_post_message),
+            ],
+        )
+
+        config = uvicorn.Config(
+            starlette_app, host=host, port=port, log_level="info"
+        )
+        server = uvicorn.Server(config)
+        await server.serve()

@@ -1,6 +1,6 @@
 # CodeSage
 
-Local-first code intelligence CLI powered by Ollama. Search your codebase using natural language.
+Local-first code intelligence CLI powered by Ollama. Search, analyze, and chat with your codebase using natural language.
 
 Works with Claude Desktop, Cursor, and Windsurf via MCP.
 
@@ -42,7 +42,7 @@ pipx inject pycodesage "pycodesage[mcp]"             # MCP server
 
 ```bash
 ollama pull qwen2.5-coder:7b
-ollama pull mxbai-embed-large
+ollama pull qwen3-embedding
 ollama serve
 ```
 
@@ -50,78 +50,59 @@ ollama serve
 
 ```bash
 cd your-project
-codesage init      # Initialize
-codesage index     # Build index
-codesage search "validate email"   # Search
-codesage chat      # Interactive mode
+codesage init      # Initialize project
+codesage index     # Build code index
+codesage chat      # Interactive chat mode
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `init` | Initialize project |
-| `index` | Build code index |
-| `search QUERY` | Semantic code search |
-| `chat` | Interactive chat mode |
-| `review` | AI code review |
-| `stats` | Show index statistics |
+| `init` | Initialize project (detects languages, creates config) |
+| `index` | Build or update the code index |
+| `chat` | Interactive chat with code intelligence |
+| `mcp serve` | Start MCP server for AI IDE integration |
+| `mcp setup` | Show MCP configuration for your IDE |
+| `mcp test` | Test MCP server functionality |
 
-<details>
-<summary>Search options</summary>
+### Chat Commands
 
-```bash
-codesage search "auth flow" --depth thorough  # Deep analysis
-codesage search "api handlers" --patterns     # Include learned patterns
-codesage search "database" --context          # Show surrounding code
-codesage search "errors" --json               # JSON output
-```
+Inside `codesage chat`, use these slash commands:
 
-</details>
+**Search & Analysis**
 
-<details>
-<summary>Chat commands</summary>
+| Command | Description |
+|---------|-------------|
+| `/search <query>` | Semantic code search |
+| `/deep <query>` | Deep multi-agent analysis |
+| `/similar <element>` | Find similar code |
+| `/patterns [query]` | Show learned patterns |
 
-```
-/search <query>   Semantic search
-/plan <task>      Implementation plan
-/deep <query>     Multi-agent analysis
-/review [file]    Code review
-/security [path]  Security scan
-/impact <element> Blast radius analysis
-/similar <code>   Find similar patterns
-/patterns         Learned patterns
-/mode <mode>      Switch mode (brainstorm/implement/review)
-/export [file]    Save conversation
-/help             Show all commands
-```
+**Planning & Review**
 
-</details>
+| Command | Description |
+|---------|-------------|
+| `/plan <task>` | Generate implementation plan |
+| `/review [file]` | Review code changes |
+| `/security [path]` | Security analysis |
+| `/impact <element>` | Impact/blast radius analysis |
 
-<details>
-<summary>Other commands</summary>
+**Session**
 
-```bash
-# MCP server
-codesage mcp serve              # Start server
-codesage mcp serve --global     # All indexed projects
-codesage mcp test               # Test tools
-
-# Developer profile
-codesage profile show           # View profile
-codesage profile patterns       # Learned patterns
-
-# Configuration
-codesage config features list   # Feature flags
-codesage config storage info    # Storage details
-codesage config hooks install   # Git pre-commit hook
-```
-
-</details>
+| Command | Description |
+|---------|-------------|
+| `/mode <mode>` | Switch mode (`brainstorm` / `implement` / `review`) |
+| `/context` | Show/modify context settings |
+| `/stats` | Show index statistics |
+| `/export [file]` | Export conversation |
+| `/clear` | Clear chat history |
+| `/help` | Show all commands |
+| `/exit` or `Ctrl+D` | Exit chat |
 
 ## MCP Setup
 
-Add to your MCP client config:
+CodeSage works as an MCP server for AI IDEs. Run `codesage mcp setup` to get the configuration, or add this to your MCP client config:
 
 ```json
 {
@@ -139,13 +120,18 @@ Add to your MCP client config:
 
 | Tool | Description |
 |------|-------------|
-| `search_code` | Semantic code search |
-| `get_file_context` | File with dependencies |
-| `get_task_context` | Implementation guidance |
-| `review_code` | Code review |
-| `analyze_security` | Vulnerability scan |
-| `detect_code_smells` | Pattern deviations |
-| `get_stats` | Index statistics |
+| `list_projects` | List all indexed projects (global mode) |
+| `get_developer_profile` | Your coding patterns and conventions |
+| `search_code` | Semantic code search with confidence scoring |
+| `get_file_context` | File content with definitions and security analysis |
+| `review_code` | Code review with static + LLM analysis |
+| `analyze_security` | Security vulnerability scanning |
+| `get_stats` | Index statistics and storage metrics |
+| `explain_concept` | Understand how a concept is implemented |
+| `suggest_approach` | Implementation guidance for a coding task |
+| `trace_flow` | Trace callers/callees through the dependency graph |
+| `find_examples` | Find usage examples of a pattern or function |
+| `recommend_pattern` | Pattern recommendations from learned memory |
 
 </details>
 
@@ -162,7 +148,7 @@ Add to your MCP client config:
 
 ## Configuration
 
-Stored in `.codesage/config.yaml`:
+Stored in `.codesage/config.yaml` (created by `codesage init`):
 
 ```yaml
 project_name: my-project
@@ -173,7 +159,7 @@ languages:
 llm:
   provider: ollama
   model: qwen2.5-coder:7b
-  embedding_model: mxbai-embed-large
+  embedding_model: qwen3-embedding
 
 exclude_dirs:
   - node_modules
@@ -189,7 +175,7 @@ exclude_dirs:
 llm:
   provider: ollama          # ollama, openai, anthropic
   model: qwen2.5-coder:7b
-  embedding_model: mxbai-embed-large
+  embedding_model: qwen3-embedding
   base_url: http://localhost:11434
   temperature: 0.3
 
@@ -206,14 +192,13 @@ security:
 # Developer memory
 memory:
   enabled: true
-  global_dir: ~/.codesage/developer
   learn_on_index: true
 
-# Feature flags
-features:
-  memory: true
-  graph_storage: true
-  code_smell_detection: false
+# Performance tuning
+performance:
+  embedding_batch_size: 200
+  embedding_cache_size: 1000
+  cache_enabled: true
 ```
 
 </details>

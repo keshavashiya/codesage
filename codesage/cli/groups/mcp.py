@@ -1,13 +1,11 @@
 """MCP command group for CodeSage CLI.
 
-Provides commands for running and managing the MCP server
-for Claude Desktop integration.
+Provides commands for running and configuring the MCP server
+for AI IDE integration.
 """
 
 import asyncio
 import json
-import os
-import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +22,7 @@ from codesage.cli.utils.console import (
 )
 from codesage.cli.utils.decorators import handle_errors
 
-app = typer.Typer(help="MCP server for Claude Desktop integration")
+app = typer.Typer(help="MCP server for AI IDE integration")
 
 
 @app.command("serve")
@@ -55,24 +53,31 @@ def serve(
         help="Run in global mode (serves all indexed projects)",
     ),
 ) -> None:
-    """Start the MCP server with stdio or HTTP/SSE transport.
+    """Start the MCP server.
 
-    **Two modes:**
+    Two modes:
 
     1. Project mode (default): Serves a specific project
+
        codesage mcp serve /path/to/project
 
-    2. Global mode: Serves all indexed projects with project_name parameter
+    2. Global mode: Serves all indexed projects
+
        codesage mcp serve --global
 
-    **Transports:**
-    - stdio: Single client, process-based (Claude Desktop)
-    - sse: Multiple clients, HTTP-based (web apps, remote)
+    Transports:
 
-    Example usage:
-      - Project mode: codesage mcp serve
-      - Global mode: codesage mcp serve --global
-      - HTTP mode: codesage mcp serve --global -t sse -p 8080
+    - stdio: Single client, process-based (default)
+
+    - sse: Multiple clients, HTTP-based
+
+    Examples:
+
+      codesage mcp serve
+
+      codesage mcp serve --global
+
+      codesage mcp serve --global -t sse -p 8080
     """
     console = get_console()
     stderr_console = get_stderr_console()
@@ -91,14 +96,13 @@ def serve(
         # Global mode: serve all projects
         from codesage.mcp.global_server import GlobalCodeSageMCPServer
 
-        # Only show panel for SSE transport (stdio must have clean stdout for JSON-RPC)
         if transport == "sse":
             console.print(
                 Panel(
                     f"[bold]Mode:[/bold] Global (all projects)\n"
                     f"[bold]Transport:[/bold] {transport}\n"
                     f"[bold]Endpoint:[/bold] http://{host}:{port}/sse",
-                    title="🌐 CodeSage Global MCP Server",
+                    title="CodeSage Global MCP Server",
                     border_style="green",
                 )
             )
@@ -108,7 +112,7 @@ def serve(
 
             if transport == "stdio":
                 asyncio.run(global_server.run_stdio())
-            else:  # sse
+            else:
                 asyncio.run(global_server.run_sse(host=host, port=port))
 
         except KeyboardInterrupt:
@@ -124,16 +128,13 @@ def serve(
 
         project_path = Path(path).resolve()
 
-        # Verify project exists
         try:
             config = Config.load(project_path)
         except FileNotFoundError:
             print_error(f"Project not initialized at {project_path}")
-            # Use stderr console to avoid corrupting stdout in stdio mode
             stderr_console.print("Run 'codesage init' first")
             raise typer.Exit(1)
 
-        # Only show panel for SSE transport (stdio must have clean stdout for JSON-RPC)
         if transport == "sse":
             console.print(
                 Panel(
@@ -142,7 +143,7 @@ def serve(
                     f"[bold]Path:[/bold] {project_path}\n"
                     f"[bold]Transport:[/bold] {transport}\n"
                     f"[bold]Endpoint:[/bold] http://{host}:{port}/sse",
-                    title="📦 CodeSage MCP Server",
+                    title="CodeSage MCP Server",
                     border_style="cyan",
                 )
             )
@@ -152,7 +153,7 @@ def serve(
 
             if transport == "stdio":
                 asyncio.run(server.run_stdio())
-            else:  # sse
+            else:
                 asyncio.run(server.run_sse(host=host, port=port))
 
         except KeyboardInterrupt:
@@ -163,16 +164,9 @@ def serve(
             raise typer.Exit(1)
 
 
-@app.command("install")
+@app.command("setup")
 @handle_errors
-def install(
-    path: str = typer.Argument(".", help="Project directory"),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="Server name (default: project name)",
-    ),
+def setup(
     transport: str = typer.Option(
         "stdio",
         "--transport",
@@ -186,372 +180,72 @@ def install(
         help="Port for SSE transport",
     ),
 ) -> None:
-    """Show MCP server configuration for different clients.
+    """Show MCP server configuration for your AI IDE.
 
-    Displays configuration examples for:
-    - Claude Desktop
-    - Cursor
-    - Windsurf
-    - Custom MCP clients
+    Displays the JSON configuration to add CodeSage as an
+    MCP server in any AI IDE that supports the MCP protocol.
 
-    Supports both stdio and SSE transports.
+    Examples:
+
+      codesage mcp setup
+
+      codesage mcp setup -t sse -p 8080
     """
-    from codesage.utils.config import Config
-
     console = get_console()
 
-    server_name = name or "codesage"
-    codesage_cmd = shutil.which("codesage") or "codesage"
+    # Always use bare "codesage" for portable cross-platform config.
+    # Users should have it on PATH via pip/pipx install.
+    codesage_cmd = "codesage"
 
-    # Show server info
     console.print(
         Panel(
-            f"[bold]Server Name:[/bold] {server_name}\n"
-            f"[bold]Mode:[/bold] Global (All Projects)\n"
+            f"[bold]Server:[/bold] codesage\n"
+            f"[bold]Mode:[/bold] Global (all indexed projects)\n"
             f"[bold]Transport:[/bold] {transport}",
-            title="CodeSage MCP Server Configuration",
+            title="CodeSage MCP Server Setup",
             border_style="green",
         )
     )
-
-    console.print()
-    console.print("[dim]This setup serves ALL indexed CodeSage projects through a single MCP server.[/dim]")
     console.print()
 
-    # Stdio configuration
     if transport == "stdio":
-        console.print("[bold cyan]═══ Stdio Transport (Process-based) ═══[/bold cyan]\n")
-
-        # Claude Desktop
-        console.print("[bold]1. Claude Desktop[/bold]")
-        console.print("[dim]Config file:[/dim] ~/.config/claude/claude_desktop_config.json (Linux)")
-        console.print("[dim]             [/dim] ~/Library/Application Support/Claude/claude_desktop_config.json (macOS)")
-        console.print()
-
-        claude_config = {
+        mcp_config = {
             "mcpServers": {
-                server_name: {
+                "codesage": {
                     "command": codesage_cmd,
                     "args": ["mcp", "serve", "--global"]
                 }
             }
         }
-        console.print(Syntax(json.dumps(claude_config, indent=2), "json", theme="monokai"))
+
+        console.print("[bold]Add this to your AI IDE's MCP configuration:[/bold]\n")
+        console.print(Syntax(json.dumps(mcp_config, indent=2), "json", theme="monokai"))
         console.print()
-
-        # Cursor
-        console.print("[bold]2. Cursor IDE[/bold]")
-        console.print("[dim]Settings → Features → MCP Servers[/dim]")
+        console.print("[bold]Available tools (12):[/bold]")
+        console.print("  [dim]Global:[/dim]  list_projects, get_developer_profile")
+        console.print("  [dim]Search:[/dim]  search_code, get_file_context, get_stats")
+        console.print("  [dim]Analysis:[/dim] review_code, analyze_security, explain_concept")
+        console.print("  [dim]Context:[/dim]  suggest_approach, trace_flow, find_examples, recommend_pattern")
         console.print()
+        console.print("[dim]Verify with: codesage mcp test[/dim]")
 
-        cursor_config = {
-            "mcpServers": {
-                server_name: {
-                    "command": codesage_cmd,
-                    "args": ["mcp", "serve", "--global"]
-                }
-            }
-        }
-        console.print(Syntax(json.dumps(cursor_config, indent=2), "json", theme="monokai"))
-        console.print()
-
-        # Windsurf
-        console.print("[bold]3. Windsurf[/bold]")
-        console.print("[dim]Settings → MCP → Add Server[/dim]")
-        console.print()
-
-        windsurf_config = {
-            "name": server_name,
-            "command": codesage_cmd,
-            "args": ["mcp", "serve", "--global"]
-        }
-        console.print(Syntax(json.dumps(windsurf_config, indent=2), "json", theme="monokai"))
-        console.print()
-
-        # Generic stdio
-        console.print("[bold]4. Custom MCP Client (Python)[/bold]")
-        console.print()
-
-        python_example = f'''from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
-async def connect():
-    params = StdioServerParameters(
-        command="{codesage_cmd}",
-        args=["mcp", "serve", "--global"]
-    )
-
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            print(f"Available tools: {{[t.name for t in tools]}}")
-'''
-        console.print(Syntax(python_example, "python", theme="monokai"))
-
-    # SSE configuration
     else:
-        console.print("[bold cyan]═══ SSE Transport (HTTP-based) ═══[/bold cyan]\n")
-
-        console.print(f"[bold]Start the server first:[/bold]")
-        console.print(f"[cyan]codesage mcp serve -t sse -p {port}[/cyan]\n")
+        console.print(f"[bold]1. Start the server:[/bold]")
+        console.print(f"   [cyan]codesage mcp serve --global -t sse -p {port}[/cyan]\n")
 
         endpoint = f"http://localhost:{port}/sse"
 
-        # Web browser
-        console.print("[bold]1. Web Browser / JavaScript[/bold]")
-        console.print()
+        console.print(f"[bold]2. Configure your AI IDE with this endpoint:[/bold]")
+        console.print(f"   [cyan]{endpoint}[/cyan]\n")
 
-        js_example = f'''import {{ Client }} from "@modelcontextprotocol/sdk/client/index.js";
-import {{ SSEClientTransport }} from "@modelcontextprotocol/sdk/client/sse.js";
-
-const transport = new SSEClientTransport(
-  new URL("{endpoint}")
-);
-
-const client = new Client({{
-  name: "{server_name}",
-  version: "1.0.0"
-}}, {{ capabilities: {{}} }});
-
-await client.connect(transport);
-
-// List tools
-const tools = await client.listTools();
-console.log("Tools:", tools.tools);
-
-// Search code
-const result = await client.callTool({{
-  name: "search_code",
-  arguments: {{ query: "authentication" }}
-}});
-'''
-        console.print(Syntax(js_example, "javascript", theme="monokai"))
-        console.print()
-
-        # Python SSE client
-        console.print("[bold]2. Python MCP Client[/bold]")
-        console.print()
-
-        python_sse = f'''from mcp import ClientSession
-from mcp.client.sse import sse_client
-
-async def connect():
-    async with sse_client(url="{endpoint}") as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            # Search code
-            result = await session.call_tool(
-                "search_code",
-                {{"query": "database query", "limit": 5}}
-            )
-            print(result)
-'''
-        console.print(Syntax(python_sse, "python", theme="monokai"))
-        console.print()
-
-        # curl example
-        console.print("[bold]3. curl / REST API[/bold]")
-        console.print()
-
-        curl_example = f'''# Connect to SSE endpoint
-curl -N {endpoint}
-
-# The endpoint supports GET requests and streams events
-'''
-        console.print(Syntax(curl_example, "bash", theme="monokai"))
-
-    # Installation instructions
-    console.print()
-    console.print("[bold yellow]📝 Next Steps:[/bold yellow]")
-    console.print()
-
-    if transport == "stdio":
-        console.print("  1. Copy the relevant configuration above")
-        console.print("  2. Add it to your MCP client's config file")
-        console.print("  3. Restart the client application")
-        console.print("  4. CodeSage tools will be available!")
-    else:
-        console.print(f"  1. Start the server: [cyan]codesage mcp serve -t sse -p {port}[/cyan]")
-        console.print(f"  2. Connect clients to: [cyan]{endpoint}[/cyan]")
-        console.print("  3. Multiple clients can connect simultaneously")
-        console.print("  4. Stop server with Ctrl+C")
-
-    console.print()
-    console.print("[dim]💡 Tip: Use `codesage mcp test` to verify the server works[/dim]")
-
-
-@app.command("uninstall")
-@handle_errors
-def uninstall(
-    name: str = typer.Argument(..., help="Server name to remove"),
-    client: str = typer.Option(
-        "claude",
-        "--client",
-        "-c",
-        help="Client type: claude, cursor, windsurf",
-    ),
-) -> None:
-    """Show instructions to remove CodeSage MCP server from a client."""
-    import sys
-
-    console = get_console()
-
-    console.print(
-        Panel(
-            f"[bold]Removing Server:[/bold] {name}\n"
-            f"[bold]Client:[/bold] {client}",
-            title="MCP Server Removal",
-            border_style="yellow",
-        )
-    )
-    console.print()
-
-    if client == "claude":
-        # Find Claude Desktop config
-        if sys.platform == "darwin":
-            config_file = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-        elif sys.platform == "win32":
-            config_file = Path(os.environ.get("APPDATA", "")) / "Claude" / "claude_desktop_config.json"
-        else:
-            config_file = Path.home() / ".config" / "claude" / "claude_desktop_config.json"
-
-        console.print(f"[bold]Config file:[/bold] {config_file}\n")
-
-        if config_file.exists():
-            console.print("[yellow]To remove the server:[/yellow]")
-            console.print(f'  1. Open {config_file}')
-            console.print(f'  2. Remove the "{name}" entry from "mcpServers"')
-            console.print("  3. Save the file")
-            console.print("  4. Restart Claude Desktop")
-        else:
-            console.print("[dim]Config file not found. Server may not be installed.[/dim]")
-
-    elif client == "cursor":
-        console.print("[bold]To remove from Cursor:[/bold]")
-        console.print("  1. Open Cursor Settings")
-        console.print("  2. Go to Features → MCP Servers")
-        console.print(f'  3. Find and remove "{name}"')
-        console.print("  4. Restart Cursor")
-
-    elif client == "windsurf":
-        console.print("[bold]To remove from Windsurf:[/bold]")
-        console.print("  1. Open Windsurf Settings")
-        console.print("  2. Go to MCP")
-        console.print(f'  3. Find and remove "{name}"')
-        console.print("  4. Restart Windsurf")
-
-    else:
-        print_error(f"Unknown client: {client}")
-        console.print("  Supported clients: claude, cursor, windsurf")
-
-
-@app.command("list")
-@handle_errors
-def list_servers(
-    client: str = typer.Option(
-        "claude",
-        "--client",
-        "-c",
-        help="Client type: claude, cursor, windsurf, all",
-    ),
-) -> None:
-    """Show where to find MCP server configurations."""
-    import sys
-
-    console = get_console()
-
-    console.print(
-        Panel(
-            "[bold]MCP Server Configuration Locations[/bold]",
-            border_style="cyan",
-        )
-    )
-    console.print()
-
-    if client in ("claude", "all"):
-        console.print("[bold cyan]Claude Desktop[/bold cyan]")
-
-        if sys.platform == "darwin":
-            config_file = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-        elif sys.platform == "win32":
-            config_file = Path(os.environ.get("APPDATA", "")) / "Claude" / "claude_desktop_config.json"
-        else:
-            config_file = Path.home() / ".config" / "claude" / "claude_desktop_config.json"
-
-        console.print(f"  📁 Config: {config_file}")
-
-        if config_file.exists():
-            try:
-                with open(config_file) as f:
-                    claude_config = json.load(f)
-                    servers = claude_config.get("mcpServers", {})
-
-                    if servers:
-                        console.print(f"  ✅ Found {len(servers)} server(s):")
-                        for name in servers.keys():
-                            is_codesage = "codesage" in str(servers[name])
-                            icon = "  �" if is_codesage else "  🔧"
-                            console.print(f"{icon} {name}")
-                    else:
-                        console.print("  [dim]No servers configured[/dim]")
-            except Exception as e:
-                console.print(f"  [yellow]Could not read config: {e}[/yellow]")
-        else:
-            console.print("  [dim]Config file not found[/dim]")
-
-        console.print()
-
-    if client in ("cursor", "all"):
-        console.print("[bold cyan]Cursor IDE[/bold cyan]")
-        console.print("  📁 Settings → Features → MCP Servers")
-        console.print("  [dim]Check Cursor settings UI for configured servers[/dim]")
-        console.print()
-
-    if client in ("windsurf", "all"):
-        console.print("[bold cyan]Windsurf[/bold cyan]")
-        console.print("  📁 Settings → MCP")
-        console.print("  [dim]Check Windsurf settings UI for configured servers[/dim]")
-        console.print()
-
-    if client == "all":
-        console.print("[dim]💡 Tip: Use --client to filter by specific client[/dim]")
-
-
-@app.command("config")
-@handle_errors
-def show_config(
-        path: str = typer.Argument(".", help="Project directory (ignored, always uses global mode)"),
-) -> None:
-    """Show MCP server configuration.
-
-    Generates the configuration for the Global CodeSage MCP Server.
-    The global server handles all indexed projects and enables cross-project intelligence.
-    """
-    console = get_console()
-    codesage_cmd = shutil.which("codesage") or "codesage"
-
-    mcp_config = {
-        "codesage": {
-            "command": codesage_cmd,
-            "args": ["mcp", "serve", "--global"],
+        sse_config = {
+            "mcpServers": {
+                "codesage": {
+                    "url": endpoint
+                }
+            }
         }
-    }
-
-    console.print(
-        Panel(
-            f"[bold]Mode:[/bold] Global (All Projects)\n"
-            f"[bold]Command:[/bold] {codesage_cmd} mcp serve --global",
-            title="MCP Server Configuration",
-            border_style="green",
-        )
-    )
-
-    console.print("\n[bold]Add this to your Claude Desktop config:[/bold]\n")
-    console.print(Syntax(json.dumps(mcp_config, indent=2), "json", theme="monokai"))
-
-    console.print("\n[dim]Or run: codesage mcp install[/dim]")
+        console.print(Syntax(json.dumps(sse_config, indent=2), "json", theme="monokai"))
 
 
 @app.command("test")
@@ -561,7 +255,14 @@ def test(
 ) -> None:
     """Test MCP server functionality.
 
-    Verifies that all MCP tools work correctly.
+    Verifies that MCP tools work correctly against an
+    indexed project.
+
+    Examples:
+
+      codesage mcp test
+
+      codesage mcp test /path/to/project
     """
     from codesage.mcp import check_mcp_available
 
@@ -588,25 +289,113 @@ def test(
 
         # Test search_code
         try:
-            result = await server._tool_search_code({"query": "function", "limit": 3})
-            results.append(("search_code", True, f"{result.get('count', 0)} results"))
+            result = await server._tool_search_code({"query": "main entry point", "limit": 3})
+            items = result.get("results", [])
+            count = len(items)
+            detail = ""
+            if items:
+                top = items[0]
+                name = top.get("name", "?")
+                file = top.get("file", "?")
+                sim = top.get("similarity", 0)
+                detail = f" → top: {name} in {file} ({sim:.0%})"
+            results.append(("search_code", count > 0, f"{count} results{detail}"))
         except Exception as e:
             results.append(("search_code", False, str(e)))
 
         # Test get_stats
         try:
             result = await server._tool_get_stats({"detailed": False})
-            results.append(("get_stats", True, f"{result.get('code_elements', 0)} elements"))
+            inner = result.get("results", {})
+            files = inner.get("files_indexed", 0)
+            elements = inner.get("code_elements", 0)
+            lang = inner.get("language", "?")
+            results.append(("get_stats", True, f"{files} files, {elements} elements ({lang})"))
         except Exception as e:
             results.append(("get_stats", False, str(e)))
 
-        # Test get_file_context (with a common file)
+        # Test get_file_context
         try:
             result = await server._tool_get_file_context({"file_path": "README.md"})
-            has_content = "content" in result or "error" in result
-            results.append(("get_file_context", has_content, "OK" if has_content else "No result"))
+            inner = result.get("results", {})
+            lines = inner.get("line_count", 0)
+            defs = len(inner.get("definitions", []))
+            results.append(("get_file_context", True, f"README.md: {lines} lines, {defs} definitions"))
         except Exception as e:
             results.append(("get_file_context", False, str(e)))
+
+        # Test explain_concept
+        try:
+            result = await server._tool_explain_concept({"concept": "main entry point", "depth": "quick"})
+            items = result.get("results", [])
+            narrative = result.get("narrative", "")
+            preview = narrative[:80] + "..." if len(narrative) > 80 else narrative
+            results.append(("explain_concept", len(items) > 0, f"{len(items)} results, narrative: {preview}"))
+        except Exception as e:
+            results.append(("explain_concept", False, str(e)))
+
+        # Test trace_flow
+        try:
+            result = await server._tool_trace_flow({"element_name": "main", "direction": "both"})
+            inner = result.get("results", {})
+            callers = inner.get("callers", [])
+            callees = inner.get("callees", [])
+            detail_parts = []
+            if callers:
+                detail_parts.append(f"callers: {', '.join(c.get('name', '?') for c in callers[:3])}")
+            if callees:
+                detail_parts.append(f"callees: {', '.join(c.get('name', '?') for c in callees[:3])}")
+            detail = " → " + "; ".join(detail_parts) if detail_parts else ""
+            results.append(("trace_flow", True, f"{len(callers)} callers, {len(callees)} callees{detail}"))
+        except Exception as e:
+            results.append(("trace_flow", False, str(e)))
+
+        # Test analyze_security
+        try:
+            result = await server._tool_analyze_security({"path": ".", "severity": "high"})
+            inner = result.get("results", {})
+            findings = inner.get("findings", [])
+            total = inner.get("total_findings", len(findings))
+            results.append(("analyze_security", True, f"{total} findings"))
+        except Exception as e:
+            results.append(("analyze_security", False, str(e)))
+
+        # Test suggest_approach
+        try:
+            result = await server._tool_suggest_approach({"task": "add caching to embeddings"})
+            inner = result.get("results", {})
+            code = inner.get("relevant_code", [])
+            patterns = inner.get("patterns", [])
+            results.append(("suggest_approach", True, f"{len(code)} relevant code, {len(patterns)} patterns"))
+        except Exception as e:
+            results.append(("suggest_approach", False, str(e)))
+
+        # Test find_examples
+        try:
+            result = await server._tool_find_examples({"pattern": "error handling", "limit": 3})
+            items = result.get("results", [])
+            results.append(("find_examples", True, f"{len(items)} examples"))
+        except Exception as e:
+            results.append(("find_examples", False, str(e)))
+
+        # Test review_code
+        try:
+            result = await server._tool_review_code({"scope": "staged"})
+            inner = result.get("results", {})
+            summary = inner.get("summary", "?")
+            issues = len(inner.get("issues", []))
+            results.append(("review_code", True, f"{issues} issues | {summary[:60]}"))
+        except Exception as e:
+            results.append(("review_code", False, str(e)))
+
+        # Test recommend_pattern
+        try:
+            result = await server._tool_recommend_pattern({"context": "error handling", "limit": 3})
+            items = result.get("results", [])
+            names = [p.get("name", "?") for p in items[:3]]
+            results.append(("recommend_pattern", True, f"{len(items)} patterns: {', '.join(names)}"))
+        except Exception as e:
+            results.append(("recommend_pattern", False, str(e)))
 
         return results
 
@@ -625,7 +414,8 @@ def test(
 
     console.print()
 
-    if passed == len(results):
-        print_success(f"All {len(results)} tests passed!")
+    total = len(results)
+    if passed == total:
+        print_success(f"All {total} tools verified!")
     else:
-        console.print(f"[yellow]{passed}/{len(results)} tests passed[/yellow]")
+        console.print(f"[yellow]{passed}/{total} tools passed[/yellow]")

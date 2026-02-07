@@ -11,6 +11,7 @@ from codesage.llm.prompts import CODE_SUGGESTION_SYSTEM, CODE_SUGGESTION_PROMPT
 from codesage.storage.manager import StorageManager
 from codesage.memory.hooks import MemoryHooks
 from codesage.memory.memory_manager import MemoryManager
+from codesage.core.confidence import ConfidenceScorer
 
 logger = get_logger("suggester")
 
@@ -37,10 +38,14 @@ class Suggester:
             config.performance,
         )
 
+        # Detect embedding dimension from model
+        self._vector_dim = self.embedder.get_dimension()
+
         # Initialize unified storage manager (uses LanceDB for vectors)
         self.storage = StorageManager(
             config=config,
             embedding_fn=self.embedder,
+            vector_dim=self._vector_dim,
         )
 
         # Legacy compatibility
@@ -57,6 +62,7 @@ class Suggester:
             self._memory_manager = MemoryManager(
                 global_dir=config.memory.global_dir,
                 embedding_fn=self.embedder.embed_batch,
+                vector_dim=self._vector_dim,
             )
             self._memory_hooks = MemoryHooks(
                 memory_manager=self._memory_manager,
@@ -64,6 +70,93 @@ class Suggester:
                 enabled=True,
             )
             logger.debug("Memory system enabled for suggester")
+
+        # Initialize confidence scorer
+        self._confidence_scorer = ConfidenceScorer(
+            graph_store=self.storage.graph_store
+            if hasattr(self.storage, "graph_store")
+            else None,
+            memory_manager=self._memory_manager,
+            project_path=str(config.project_path),
+        )
+
+    @staticmethod
+    def calculate_dynamic_threshold(query: str, base_threshold: float = 0.2) -> float:
+        """Calculate similarity threshold based on query characteristics.
+
+        Adjusts threshold dynamically based on query length and specificity:
+        - Short queries (1-2 words) need higher precision
+        - Long queries (6+ words) can use lower thresholds
+        - Queries with technical terms get a boost
+        - Queries with code element names (camelCase/snake_case) get a boost
+
+        Args:
+            query: The search query string
+            base_threshold: Starting threshold (default: 0.2)
+
+        Returns:
+            Adjusted threshold between 0.1 and 0.5
+        """
+        if not query or not query.strip():
+            return base_threshold
+
+        query_lower = query.lower().strip()
+        words = query_lower.split()
+        word_count = len(words)
+
+        # Factor 1: Query length adjustment
+        if word_count <= 2:
+            # Short queries need higher precision to avoid noise
+            length_factor = 0.15
+        elif word_count <= 5:
+            # Medium length - use base threshold
+            length_factor = 0.0
+        else:
+            # Long queries can use lower threshold for better recall
+            length_factor = -0.05
+
+        # Factor 2: Technical terminology boost
+        technical_terms = {
+            "function",
+            "class",
+            "method",
+            "implementation",
+            "algorithm",
+            "pattern",
+            "architecture",
+            "component",
+            "module",
+            "service",
+            "provider",
+            "handler",
+            "manager",
+            "strategy",
+            "interface",
+        }
+        has_technical_term = any(term in words for term in technical_terms)
+        specificity_boost = 0.05 if has_technical_term else 0.0
+
+        # Factor 3: Code element name patterns (camelCase or snake_case)
+        # Check for underscores (snake_case) or internal capitals (camelCase)
+        has_underscore = "_" in query and any(c.isalpha() for c in query.split("_")[0])
+        has_camelcase = (
+            any(
+                c.isupper()
+                for i, c in enumerate(query[1:], 1)
+                if query[i - 1].islower()
+            )
+            if len(query) > 1
+            else False
+        )
+
+        if has_underscore or has_camelcase:
+            specificity_boost += 0.1
+
+        # Calculate final threshold
+        threshold = base_threshold + length_factor + specificity_boost
+
+        # Clamp between reasonable bounds
+        return max(0.1, min(0.5, threshold))
 
     def find_similar(
         self,
@@ -113,8 +206,12 @@ class Suggester:
                 line=element.line_start if element else metadata.get("line_start", 0),
                 code=element.code if element else result.get("document", ""),
                 similarity=similarity,
-                language=element.language if element else metadata.get("language", "python"),
-                element_type=element.type if element else metadata.get("type", "unknown"),
+                language=element.language
+                if element
+                else metadata.get("language", "python"),
+                element_type=element.type
+                if element
+                else metadata.get("type", "unknown"),
                 name=element.name if element else metadata.get("name"),
                 docstring=element.docstring if element else None,
             )
@@ -129,6 +226,11 @@ class Suggester:
                 suggestion.dependencies = result.get("dependencies", [])
                 suggestion.dependents = result.get("dependents", [])
                 suggestion.impact_score = result.get("impact_score")
+
+            # Compute confidence score
+            confidence = self._confidence_scorer.score_suggestion(suggestion, query)
+            suggestion.confidence_score = confidence.score
+            suggestion.confidence_tier = confidence.tier
 
             # Generate explanation for top 3 results when requested
             if include_explanations and len(suggestions) < 3:
@@ -346,15 +448,17 @@ class Suggester:
                 if element_type and element.type != element_type:
                     continue
 
-                suggestions.append(Suggestion(
-                    file=element.file,
-                    line=element.line_start,
-                    code=element.code,
-                    similarity=1.0,  # Exact name match
-                    language=element.language,
-                    element_type=element.type,
-                    name=element.name,
-                    docstring=element.docstring,
-                ))
+                suggestions.append(
+                    Suggestion(
+                        file=element.file,
+                        line=element.line_start,
+                        code=element.code,
+                        similarity=1.0,  # Exact name match
+                        language=element.language,
+                        element_type=element.type,
+                        name=element.name,
+                        docstring=element.docstring,
+                    )
+                )
 
         return suggestions

@@ -142,6 +142,7 @@ class DeepAnalyzer:
             self._memory = MemoryManager(
                 global_dir=self.config.memory.global_dir,
                 embedding_fn=embedder.embed_batch,
+                vector_dim=embedder.get_dimension(),
             )
         return self._memory
 

@@ -35,20 +35,20 @@ class LanceVectorStore(VectorStoreBase):
     """
 
     TABLE_NAME = "code_elements"
-    VECTOR_DIM = 1024  # mxbai-embed-large dimension
+    VECTOR_DIM = 4096  # qwen3-embedding default dimension
 
     def __init__(
         self,
         persist_dir: Union[str, Path],
         embedding_fn: EmbeddingFunction,
-        vector_dim: int = 1024,
+        vector_dim: int = VECTOR_DIM,
     ) -> None:
         """Initialize the LanceDB vector store.
 
         Args:
             persist_dir: Directory for LanceDB persistence.
             embedding_fn: Function to generate embeddings from text.
-            vector_dim: Dimension of embedding vectors (default: 1024 for mxbai).
+            vector_dim: Dimension of embedding vectors.
         """
         try:
             import lancedb
@@ -77,7 +77,21 @@ class LanceVectorStore(VectorStoreBase):
         import pyarrow as pa
 
         if self.TABLE_NAME in self._db.table_names():
-            return self._db.open_table(self.TABLE_NAME)
+            table = self._db.open_table(self.TABLE_NAME)
+            # Check for dimension mismatch (e.g. embedding model changed)
+            try:
+                vec_field = table.schema.field("vector")
+                existing_dim = vec_field.type.list_size
+                if existing_dim != self.vector_dim:
+                    logger.warning(
+                        f"Vector dimension mismatch: table has {existing_dim}, "
+                        f"expected {self.vector_dim}. Recreating table."
+                    )
+                    self._db.drop_table(self.TABLE_NAME)
+                else:
+                    return table
+            except Exception:
+                return table
 
         # Define schema for code elements
         schema = pa.schema(

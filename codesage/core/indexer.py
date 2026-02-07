@@ -52,10 +52,14 @@ class Indexer:
             config.performance,
         )
 
+        # Detect embedding dimension from model
+        self._vector_dim = self.embedder.get_dimension()
+
         # Initialize unified storage manager
         self.storage = StorageManager(
             config=config,
             embedding_fn=self.embedder,
+            vector_dim=self._vector_dim,
         )
 
         # Legacy compatibility
@@ -68,6 +72,7 @@ class Indexer:
             self._memory_hooks = MemoryHooks(
                 embedding_fn=self.embedder.embed_batch,
                 enabled=True,
+                vector_dim=self._vector_dim,
             )
             logger.debug("Memory learning enabled for indexer")
 
@@ -216,12 +221,19 @@ class Indexer:
             logger.error(f"Error indexing {file_path}: {e}")
             return 0
 
+    # Sub-batch size for embedding generation (smaller = more frequent progress updates)
+    EMBEDDING_SUB_BATCH = 32
+
     def index_repository(
         self,
         incremental: bool = True,
         show_progress: bool = True,
     ) -> IndexStats:
         """Index the entire repository.
+
+        Two-phase approach for better UX:
+        1. Parse files and store metadata/graph (fast, with file progress bar)
+        2. Generate embeddings in sub-batches (slower, with element progress bar)
 
         Args:
             incremental: Only index changed files
@@ -240,12 +252,15 @@ class Indexer:
             "relationships_added": 0,
             "errors": 0,
         }
+        # Collect ALL elements for deferred embedding (no mid-parse flushes)
         self._batch_elements = []
         self._batch_file_count = 0
+        self._defer_embeddings = True
 
         # Collect files first to show accurate progress
         files = list(self.walk_repository())
 
+        # Phase 1: Parse files and store metadata/graph (fast)
         if show_progress:
             with Progress(
                 SpinnerColumn(),
@@ -253,12 +268,12 @@ class Indexer:
                 BarColumn(),
                 TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             ) as progress:
-                task = progress.add_task("Indexing...", total=len(files))
+                task = progress.add_task("Parsing files...", total=len(files))
 
                 for file_path in files:
                     progress.update(
                         task,
-                        description=f"[cyan]{file_path.name}",
+                        description=f"[cyan]Parsing {file_path.name}",
                         advance=1,
                     )
 
@@ -267,7 +282,7 @@ class Indexer:
                         force=not incremental,
                     )
 
-                progress.update(task, description="[green]✓ Complete")
+                progress.update(task, description="[green]✓ Parsing complete")
         else:
             for file_path in files:
                 self._index_file_for_batch(
@@ -275,14 +290,18 @@ class Indexer:
                     force=not incremental,
                 )
 
-        # Flush any remaining batch embeddings
-        self._flush_batch_embeddings()
+        # Phase 2: Generate embeddings with progress
+        self._flush_batch_embeddings(show_progress=show_progress)
 
-        # Update database stats
-        self.db.update_stats(
-            self.stats["files_indexed"],
-            self.stats["elements_found"],
-        )
+        # Update database stats from actual DB counts (not run delta)
+        if self.stats["files_indexed"] > 0:
+            total_files = self.db.conn.execute(
+                "SELECT COUNT(*) FROM indexed_files"
+            ).fetchone()[0]
+            total_elements = self.db.conn.execute(
+                "SELECT COUNT(*) FROM code_elements"
+            ).fetchone()[0]
+            self.db.update_stats(total_files, total_elements)
 
         # Notify memory system that project indexing is complete
         if self._memory_hooks:
@@ -369,14 +388,16 @@ class Indexer:
             self._batch_elements.extend(elements)
             self._batch_file_count += 1
 
-            max_files = self.config.performance.embedding_batch_size
-            max_elements = self.config.performance.max_elements_per_batch
+            # Only flush mid-parse when not deferring (non-progress mode)
+            if not getattr(self, "_defer_embeddings", False):
+                max_files = self.config.performance.embedding_batch_size
+                max_elements = self.config.performance.max_elements_per_batch
 
-            if (
-                self._batch_file_count >= max_files
-                or len(self._batch_elements) >= max_elements
-            ):
-                self._flush_batch_embeddings()
+                if (
+                    self._batch_file_count >= max_files
+                    or len(self._batch_elements) >= max_elements
+                ):
+                    self._flush_batch_embeddings()
 
             return len(elements)
 
@@ -385,16 +406,51 @@ class Indexer:
             logger.error(f"Error indexing {file_path}: {e}")
             return 0
 
-    def _flush_batch_embeddings(self) -> None:
-        """Flush queued elements to the vector store in a single batch."""
+    def _flush_batch_embeddings(self, show_progress: bool = False) -> None:
+        """Flush queued elements to the vector store with sub-batching.
+
+        Args:
+            show_progress: Show a progress bar for embedding generation.
+        """
         if not hasattr(self, "_batch_elements"):
             return
         if not self._batch_elements:
             return
-        if self.storage.vector_store:
+        if not self.storage.vector_store:
+            self._batch_elements = []
+            self._batch_file_count = 0
+            return
+
+        total = len(self._batch_elements)
+        batch_size = self.EMBEDDING_SUB_BATCH
+
+        if show_progress and total > batch_size:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("[dim]{task.completed}/{task.total} elements[/dim]"),
+            ) as progress:
+                task = progress.add_task(
+                    "[cyan]Generating embeddings...", total=total
+                )
+
+                for i in range(0, total, batch_size):
+                    sub_batch = self._batch_elements[i : i + batch_size]
+                    self.storage.vector_store.add_elements(sub_batch)
+                    progress.update(task, advance=len(sub_batch))
+
+                progress.update(
+                    task, description="[green]✓ Embeddings complete"
+                )
+        else:
+            # Small batch or no progress — flush in one go
             self.storage.vector_store.add_elements(self._batch_elements)
+
         self._batch_elements = []
         self._batch_file_count = 0
+        self._defer_embeddings = False
 
     def clear_index(self) -> None:
         """Clear all indexed data from all backends."""
@@ -423,6 +479,7 @@ class Indexer:
             self._memory_hooks = MemoryHooks(
                 embedding_fn=self.embedder.embed_batch,
                 enabled=True,
+                vector_dim=self._vector_dim,
             )
 
     def get_memory_stats(self) -> Optional[Dict[str, Any]]:

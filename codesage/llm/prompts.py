@@ -101,6 +101,25 @@ For each issue, provide:
 If no issues are found, say "No security issues detected."
 """
 
+# Query Expansion Prompts
+QUERY_EXPANSION_SYSTEM = """You are a code search query optimizer. Given a developer's natural language query, extract their intent and generate optimal search terms. Respond ONLY with valid JSON."""
+
+QUERY_EXPANSION_PROMPT = """Analyze this developer query and generate search optimization:
+
+Query: {query}
+Current mode: {mode}
+Recent topics: {recent_topics}
+
+Respond with JSON:
+{{
+  "intent": "explain|implement|debug|refactor|review|search|explore",
+  "confidence": 0.0-1.0,
+  "search_terms": ["term1", "term2"],
+  "related_patterns": ["pattern1", "pattern2"],
+  "is_ambiguous": true/false,
+  "clarifications": ["question1", "question2"]
+}}"""
+
 SECURITY_DIFF_ANALYSIS_PROMPT = """Analyze these code changes for security implications:
 
 ```diff

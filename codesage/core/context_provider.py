@@ -32,6 +32,7 @@ class ContextProvider:
             self._memory = MemoryManager(
                 global_dir=config.memory.global_dir,
                 embedding_fn=embedder.embed_batch,
+                vector_dim=embedder.get_dimension(),
             )
 
     def get_implementation_context(

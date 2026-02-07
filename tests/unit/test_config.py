@@ -16,7 +16,7 @@ class TestLLMConfig:
 
         assert config.provider == "ollama"
         assert config.model == "qwen2.5-coder:7b"
-        assert config.embedding_model == "mxbai-embed-large"
+        assert config.embedding_model == "qwen3-embedding"
         assert config.temperature == 0.3
 
     def test_custom_values(self):

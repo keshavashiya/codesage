@@ -34,6 +34,7 @@ class MemoryHooks:
         memory_manager: Optional[MemoryManager] = None,
         embedding_fn: Optional[Callable[[List[str]], List[List[float]]]] = None,
         enabled: bool = True,
+        vector_dim: int = 0,
     ) -> None:
         """Initialize memory hooks.
 
@@ -41,11 +42,13 @@ class MemoryHooks:
             memory_manager: Optional existing MemoryManager.
             embedding_fn: Optional embedding function.
             enabled: Whether learning is enabled.
+            vector_dim: Embedding vector dimension (0 = use store default).
         """
         self._enabled = enabled
         self._memory: Optional[MemoryManager] = memory_manager
         self._engine: Optional[LearningEngine] = None
         self._embedding_fn = embedding_fn
+        self._vector_dim = vector_dim
 
         # Statistics
         self._elements_processed = 0
@@ -65,7 +68,10 @@ class MemoryHooks:
     def _ensure_initialized(self) -> None:
         """Ensure memory manager and engine are initialized."""
         if self._memory is None:
-            self._memory = MemoryManager(embedding_fn=self._embedding_fn)
+            self._memory = MemoryManager(
+                embedding_fn=self._embedding_fn,
+                vector_dim=self._vector_dim,
+            )
 
         if self._engine is None:
             self._engine = LearningEngine(

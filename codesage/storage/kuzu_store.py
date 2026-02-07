@@ -520,6 +520,26 @@ class KuzuGraphStore:
 
         return paths
 
+    def find_nodes_by_name(self, name: str) -> List[Dict[str, Any]]:
+        """Find nodes by name.
+
+        Args:
+            name: Name of the code element to find.
+
+        Returns:
+            List of matching nodes.
+        """
+        result = self._conn.execute(
+            """
+            MATCH (n:CodeNode)
+            WHERE n.name = $name
+            RETURN n.id AS id, n.name AS name, n.node_type AS type,
+                   n.file AS file, n.line_start AS line_start, n.line_end AS line_end
+            """,
+            {"name": name},
+        )
+        return self._result_to_list(result)
+
     def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
         """Get a node by ID.
 

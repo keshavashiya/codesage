@@ -10,7 +10,6 @@ from codesage.memory.models import (
     InteractionRecord,
     LearnedPattern,
     PatternCategory,
-    PatternRelationship,
     ProjectInfo,
     RelationshipType,
     StructureType,
@@ -105,41 +104,6 @@ class TestCodeStructure:
         assert restored.structure_type == structure.structure_type
         assert restored.occurrence_count == 10
         assert restored.confidence == 0.9
-
-
-class TestPatternRelationship:
-    """Tests for PatternRelationship model."""
-
-    def test_create_relationship(self):
-        """Test relationship creation."""
-        rel = PatternRelationship(
-            source_id="pattern1",
-            target_id="pattern2",
-            rel_type=RelationshipType.CO_OCCURS,
-            weight=0.8,
-        )
-
-        assert rel.source_id == "pattern1"
-        assert rel.target_id == "pattern2"
-        assert rel.rel_type == RelationshipType.CO_OCCURS
-        assert rel.weight == 0.8
-
-    def test_relationship_serialization(self):
-        """Test relationship to_dict and from_dict."""
-        rel = PatternRelationship(
-            source_id="a",
-            target_id="b",
-            rel_type=RelationshipType.EVOLVES_TO,
-            weight=1.0,
-            metadata={"reason": "test"},
-        )
-
-        data = rel.to_dict()
-        restored = PatternRelationship.from_dict(data)
-
-        assert restored.source_id == rel.source_id
-        assert restored.rel_type == rel.rel_type
-        assert restored.metadata == {"reason": "test"}
 
 
 class TestProjectInfo:

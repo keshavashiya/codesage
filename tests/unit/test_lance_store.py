@@ -56,7 +56,7 @@ class TestLanceVectorStoreInit:
         store_path = tmp_path / "new_lance_store"
         assert not store_path.exists()
 
-        store = LanceVectorStore(store_path, mock_embedder)
+        store = LanceVectorStore(store_path, mock_embedder, vector_dim=1024)
 
         assert store_path.exists()
 
@@ -70,11 +70,11 @@ class TestLanceVectorStoreInit:
         from codesage.storage.lance_store import LanceVectorStore
 
         # Create first store and add data
-        store1 = LanceVectorStore(tmp_path / "lance", mock_embedder)
+        store1 = LanceVectorStore(tmp_path / "lance", mock_embedder, vector_dim=1024)
         store1.add(["id1"], ["test document"])
 
         # Create second store pointing to same location
-        store2 = LanceVectorStore(tmp_path / "lance", mock_embedder)
+        store2 = LanceVectorStore(tmp_path / "lance", mock_embedder, vector_dim=1024)
 
         # Should have the same data
         assert store2.count() == 1
@@ -330,12 +330,12 @@ class TestCreateLanceEmbeddingFn:
         """Test creating embedding function from LangChain embedder."""
         from codesage.storage.lance_store import create_lance_embedding_fn
 
-        # Mock LangChain embedder
+        # Mock LangChain embedder with embed_batch (checked first by implementation)
         mock_embedder = MagicMock()
-        mock_embedder.embed_documents.return_value = [[0.1, 0.2, 0.3]]
+        mock_embedder.embed_batch.return_value = [[0.1, 0.2, 0.3]]
 
         embed_fn = create_lance_embedding_fn(mock_embedder)
         result = embed_fn(["test"])
 
-        mock_embedder.embed_documents.assert_called_once_with(["test"])
+        mock_embedder.embed_batch.assert_called_once_with(["test"])
         assert result == [[0.1, 0.2, 0.3]]

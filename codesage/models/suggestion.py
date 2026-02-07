@@ -31,6 +31,10 @@ class Suggestion:
     # Pattern context (from memory system)
     matching_patterns: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Confidence scoring
+    confidence_score: float = 0.0
+    confidence_tier: str = "low"
+
     def to_dict(self) -> dict:
         """Convert to dictionary."""
         result = {
@@ -62,6 +66,9 @@ class Suggestion:
             result["impact_score"] = self.impact_score
         if self.matching_patterns:
             result["matching_patterns"] = self.matching_patterns
+        if self.confidence_score > 0:
+            result["confidence_score"] = self.confidence_score
+            result["confidence_tier"] = self.confidence_tier
 
         return result
 

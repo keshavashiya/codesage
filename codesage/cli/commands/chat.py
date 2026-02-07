@@ -10,9 +10,8 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.status import Status
 
-from codesage.cli.utils.console import get_console, print_error, print_success
+from codesage.cli.utils.console import get_console, print_error
 from codesage.cli.utils.decorators import handle_errors
 
 if TYPE_CHECKING:
@@ -96,14 +95,8 @@ def chat(
 
 
 def _run_chat_loop(console: Console, engine: "ChatEngine") -> None:
-    """Run the main chat loop.
-
-    Args:
-        console: Rich console instance
-        engine: Chat engine instance
-    """
+    """Run the main chat loop with streaming support."""
     while True:
-        # Get user input
         try:
             user_input = Prompt.ask("[bold blue]You[/bold blue]")
         except (KeyboardInterrupt, EOFError):
@@ -112,48 +105,103 @@ def _run_chat_loop(console: Console, engine: "ChatEngine") -> None:
         if not user_input.strip():
             continue
 
-        # Process input with spinner for LLM calls
-        is_command = user_input.strip().startswith("/")
-
-        if is_command:
-            # Commands are fast, no spinner needed
-            response, should_continue = engine.process_input(user_input)
-        else:
-            # LLM calls get a spinner
-            with Status("[cyan]Thinking...", spinner="dots", console=console):
-                response, should_continue = engine.process_input(user_input)
-
-        # Check if we should exit
-        if not should_continue:
-            console.print(f"\n[dim]{response}[/dim]")
+        # All input goes through streaming path.
+        # process_input_stream() handles both:
+        # - LLM commands (/deep, /review, etc.) → streamed token-by-token
+        # - Non-LLM commands (/help, /stats, etc.) → single "done" yield
+        # - Regular messages → streamed token-by-token
+        should_exit = _stream_response(console, engine, user_input)
+        if should_exit:
             break
 
-        # Display response
-        _display_response(console, response, is_command)
 
+def _stream_response(console: Console, engine: "ChatEngine", user_input: str) -> bool:
+    """Stream a chat response with a spinner and formatted final output.
 
-def _display_response(console: Console, response: str, is_command: bool) -> None:
-    """Display the assistant response.
+    rich.live.Live cannot handle content taller than the terminal — it
+    uses ANSI cursor-up to overwrite, which fails once content scrolls
+    off-screen, causing duplicated / frozen panels.
 
-    Args:
-        console: Rich console instance
-        response: Response text
-        is_command: Whether this was a command response
+    Instead we:
+      1. Print status and context directly (static output).
+      2. Show a spinner with a live word-count while tokens arrive.
+      3. Print the full Markdown Panel once streaming completes.
+
+    Returns:
+        True if the user requested exit, False otherwise.
     """
     console.print()
 
-    if is_command:
-        # Commands get simple markdown rendering
-        console.print(Markdown(response))
-    else:
-        # Chat responses get a styled panel
+    collected_tokens: list[str] = []
+    exiting = False
+
+    with console.status(
+        "[bold green]CodeSage[/bold green] [dim]is thinking…[/dim]",
+        spinner="dots",
+    ) as status:
+        for chunk_type, content in engine.process_input_stream(user_input):
+            if chunk_type == "exit":
+                exiting = True
+                break
+
+            elif chunk_type == "status":
+                status.update(
+                    f"[bold green]CodeSage[/bold green] [dim]{content}[/dim]"
+                )
+
+            elif chunk_type == "context":
+                # Temporarily stop spinner so the panel prints cleanly.
+                status.stop()
+                console.print(
+                    Panel(
+                        Markdown(content),
+                        title="[bold cyan]Context[/bold cyan]",
+                        border_style="cyan",
+                    )
+                )
+                status.start()
+                status.update(
+                    "[bold green]CodeSage[/bold green] [dim]is generating…[/dim]"
+                )
+
+            elif chunk_type == "token":
+                collected_tokens.append(content)
+                words = len("".join(collected_tokens).split())
+                status.update(
+                    f"[bold green]CodeSage[/bold green] "
+                    f"[dim]is generating… ({words} words)[/dim]"
+                )
+
+            elif chunk_type == "done":
+                if not collected_tokens:
+                    # Non-streamed response (commands, clarifications).
+                    # Stop spinner, print, then let the with-block clean up.
+                    status.stop()
+                    console.print(
+                        Panel(
+                            Markdown(content),
+                            title="[bold green]CodeSage[/bold green]",
+                            border_style="green",
+                            padding=(1, 2),
+                        )
+                    )
+
+    # Print the full formatted response.
+    if collected_tokens:
         console.print(
             Panel(
-                Markdown(response),
+                Markdown("".join(collected_tokens)),
                 title="[bold green]CodeSage[/bold green]",
                 border_style="green",
                 padding=(1, 2),
             )
         )
 
-    console.print()
+    if exiting:
+        console.print(f"\n[dim]Goodbye![/dim]")
+    else:
+        console.print()
+
+    return exiting
+
+

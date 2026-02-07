@@ -36,15 +36,18 @@ class StorageManager:
         self,
         config: "Config",
         embedding_fn=None,
+        vector_dim: int = 0,
     ) -> None:
         """Initialize storage manager with all backends.
 
         Args:
             config: CodeSage configuration
             embedding_fn: Embedding function for vector store (required for LanceDB)
+            vector_dim: Embedding vector dimension (0 = use store default)
         """
         self.config = config
         self._embedding_fn = embedding_fn
+        self._vector_dim = vector_dim
 
         # Initialize SQLite database
         self.db = Database(config.storage.db_path)
@@ -75,10 +78,14 @@ class StorageManager:
         # Wrap embedding function to support EmbeddingService, LangChain, or callables
         embed_fn = create_lance_embedding_fn(self._embedding_fn)
 
-        self._vector_store = LanceVectorStore(
-            persist_dir=self.config.storage.lance_path,
-            embedding_fn=embed_fn,
-        )
+        kwargs = {
+            "persist_dir": self.config.storage.lance_path,
+            "embedding_fn": embed_fn,
+        }
+        if self._vector_dim > 0:
+            kwargs["vector_dim"] = self._vector_dim
+
+        self._vector_store = LanceVectorStore(**kwargs)
         logger.debug("Initialized LanceDB vector store")
 
         return self._vector_store

@@ -20,10 +20,10 @@ def init(
         help="Ollama model to use for analysis",
     ),
     embedding_model: str = typer.Option(
-        "mxbai-embed-large",
+        "qwen3-embedding",
         "--embedding-model",
         "-e",
-        help="Model to use for embeddings (mxbai-embed-large recommended for code)",
+        help="Embedding model (qwen3-embedding recommended, 32K context for code)",
     ),
     no_detect: bool = typer.Option(
         False,
@@ -89,5 +89,5 @@ def init(
     console.print(f"     [cyan]ollama pull {model}[/cyan]")
     console.print(f"     [cyan]ollama pull {embedding_model}[/cyan]")
     console.print("  3. Index your codebase: [cyan]codesage index[/cyan]")
-    console.print("  4. Search for code: [cyan]codesage suggest 'your query'[/cyan]\n")
+    console.print("  4. Start chatting: [cyan]codesage chat[/cyan]\n")
 

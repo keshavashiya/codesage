@@ -31,13 +31,13 @@ class PatternStore:
     """
 
     TABLE_NAME = "patterns"
-    VECTOR_DIM = 1024  # mxbai-embed-large dimension
+    VECTOR_DIM = 4096  # qwen3-embedding default dimension
 
     def __init__(
         self,
         persist_dir: Union[str, Path],
         embedding_fn: Optional[EmbeddingFunction] = None,
-        vector_dim: int = 1024,
+        vector_dim: int = VECTOR_DIM,
     ) -> None:
         """Initialize the pattern store.
 
@@ -73,7 +73,21 @@ class PatternStore:
         import pyarrow as pa
 
         if self.TABLE_NAME in self._db.table_names():
-            return self._db.open_table(self.TABLE_NAME)
+            table = self._db.open_table(self.TABLE_NAME)
+            # Check for dimension mismatch (e.g. embedding model changed)
+            try:
+                vec_field = table.schema.field("vector")
+                existing_dim = vec_field.type.list_size
+                if existing_dim != self.vector_dim:
+                    logger.warning(
+                        f"Vector dimension mismatch: table has {existing_dim}, "
+                        f"expected {self.vector_dim}. Recreating table."
+                    )
+                    self._db.drop_table(self.TABLE_NAME)
+                else:
+                    return table
+            except Exception:
+                return table
 
         # Define schema for patterns
         schema = pa.schema(

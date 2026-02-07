@@ -51,6 +51,7 @@ class MemoryManager:
         self,
         global_dir: Optional[Path] = None,
         embedding_fn: Optional[EmbeddingFunction] = None,
+        vector_dim: int = 0,
     ) -> None:
         """Initialize the memory manager.
 
@@ -58,11 +59,13 @@ class MemoryManager:
             global_dir: Directory for global memory storage.
                        Defaults to ~/.codesage/developer/
             embedding_fn: Optional function for generating embeddings.
+            vector_dim: Embedding vector dimension (0 = use store default).
         """
         self.global_dir = Path(global_dir) if global_dir else self.GLOBAL_DIR
         self.global_dir.mkdir(parents=True, exist_ok=True)
 
         self._embedding_fn = embedding_fn
+        self._vector_dim = vector_dim
 
         # Lazy-loaded backends
         self._preference_store: Optional[PreferenceStore] = None
@@ -99,10 +102,13 @@ class MemoryManager:
         """
         if self._pattern_store is None:
             lance_path = self.global_dir / "patterns.lance"
-            self._pattern_store = PatternStore(
-                persist_dir=lance_path,
-                embedding_fn=self._embedding_fn,
-            )
+            kwargs = {
+                "persist_dir": lance_path,
+                "embedding_fn": self._embedding_fn,
+            }
+            if self._vector_dim > 0:
+                kwargs["vector_dim"] = self._vector_dim
+            self._pattern_store = PatternStore(**kwargs)
             logger.debug("Initialized PatternStore")
         return self._pattern_store
 

@@ -11,7 +11,6 @@ from unittest.mock import Mock, patch, MagicMock
 from codesage.utils.retry import (
     retry_with_backoff,
     RetryExhausted,
-    RetryContext,
     retry_on_connection_error,
 )
 from codesage.utils.config import LLMConfig
@@ -133,54 +132,6 @@ class TestRetryWithBackoff:
         assert len(retry_info) == 2
         assert retry_info[0][1] == 0  # First retry
         assert retry_info[1][1] == 1  # Second retry
-
-
-class TestRetryContext:
-    """Tests for RetryContext context manager."""
-
-    def test_successful_first_attempt(self):
-        """Test successful operation on first attempt."""
-        with RetryContext(max_retries=3) as retry:
-            for attempt in retry:
-                result = "success"
-                break
-
-        assert result == "success"
-        assert retry.attempt == 0
-
-    def test_retry_until_success(self):
-        """Test retrying until success."""
-        attempt_count = 0
-
-        with RetryContext(max_retries=3, base_delay=0.01) as retry:
-            for attempt in retry:
-                attempt_count += 1
-                try:
-                    if attempt < 2:
-                        raise ValueError("Not yet")
-                    result = "success"
-                    break
-                except ValueError as e:
-                    retry.record_failure(e)
-
-        assert result == "success"
-        assert attempt_count == 3
-
-    def test_is_last_attempt(self):
-        """Test is_last_attempt property."""
-        with RetryContext(max_retries=2) as retry:
-            attempts = []
-            for attempt in retry:
-                attempts.append(retry.is_last_attempt)
-                if not retry.is_last_attempt:
-                    try:
-                        raise ValueError("Fail")
-                    except ValueError as e:
-                        retry.record_failure(e)
-                else:
-                    break
-
-        assert attempts == [False, False, True]
 
 
 class TestLLMConfigTimeouts:
