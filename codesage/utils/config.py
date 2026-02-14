@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 import yaml
 import json
@@ -10,20 +10,45 @@ import json
 
 @dataclass
 class LLMConfig:
-    """LLM provider configuration."""
+    """Enhanced LLM provider configuration with full Ollama support."""
 
     provider: str = "ollama"  # ollama, openai, anthropic
     model: str = "qwen2.5-coder:7b"
-    embedding_model: str = "qwen3-embedding"
+    embedding_model: str = "nomic-embed-text"
     base_url: Optional[str] = "http://localhost:11434"
-    api_key: Optional[str] = field(default_factory=lambda: os.getenv("CODESAGE_API_KEY"))
+    api_key: Optional[str] = field(
+        default_factory=lambda: os.getenv("CODESAGE_API_KEY")
+    )
     temperature: float = 0.3
     max_tokens: int = 500
 
     # Production hardening: timeout and retry settings
     request_timeout: float = 30.0  # Timeout for LLM requests (seconds)
-    connect_timeout: float = 5.0   # Timeout for initial connection (seconds)
-    max_retries: int = 3           # Maximum retry attempts for transient failures
+    connect_timeout: float = 5.0  # Timeout for initial connection (seconds)
+    max_retries: int = 3  # Maximum retry attempts for transient failures
+
+    # Advanced model parameters (Ollama-specific)
+    context_window: int = 32768  # Maximum context window size
+    num_predict: int = 128  # Maximum tokens to predict
+    top_k: int = 40  # Top-k sampling parameter (0-100)
+    top_p: float = 0.9  # Top-p sampling parameter (0.0-1.0)
+    repeat_penalty: float = 1.1  # Repetition penalty (1.0 = disabled)
+    repeat_last_n: int = 64  # Number of tokens to consider for repetition
+
+    # Token management
+    token_bucket_size: int = 1000  # Token bucket size for rate limiting
+    token_bucket_refill_rate: int = 60  # Tokens per minute refill rate
+
+    # Text processing
+    chunk_size: int = 512  # Text chunking size for embeddings
+    chunk_overlap: int = 50  # Overlap between chunks (tokens)
+
+    # Custom sequences - empty by default to avoid truncation
+    # Can be configured for specific use cases (e.g., ["```"] for code blocks)
+    stop_sequences: List[str] = field(default_factory=list)
+
+    # Model-specific parameters (passed directly to Ollama)
+    model_parameters: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         """Validate LLM configuration."""
@@ -40,6 +65,51 @@ class LLMConfig:
         if self.max_retries < 0:
             raise ValueError("max_retries must be non-negative")
 
+        # Validate Ollama-specific parameters
+        self.validate_ollama_config()
+
+    def validate_ollama_config(self) -> None:
+        """Validate Ollama-specific configuration parameters."""
+        if self.provider != "ollama":
+            return
+
+        # Validate parameter ranges
+        if not (0.0 <= self.temperature <= 2.0):
+            raise ValueError("temperature must be between 0.0 and 2.0")
+
+        if not (0.0 <= self.top_p <= 1.0):
+            raise ValueError("top_p must be between 0.0 and 1.0")
+
+        if self.top_k < 0:
+            raise ValueError("top_k must be non-negative")
+
+        if self.chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+
+        if self.chunk_overlap < 0:
+            raise ValueError("chunk_overlap must be non-negative")
+
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be less than chunk_size")
+
+        if self.token_bucket_size <= 0:
+            raise ValueError("token_bucket_size must be positive")
+
+        if self.token_bucket_refill_rate <= 0:
+            raise ValueError("token_bucket_refill_rate must be positive")
+
+        if self.context_window <= 0:
+            raise ValueError("context_window must be positive")
+
+        if self.num_predict < 0:
+            raise ValueError("num_predict must be non-negative")
+
+        if self.repeat_penalty < 0:
+            raise ValueError("repeat_penalty must be non-negative")
+
+        if self.repeat_last_n < 0:
+            raise ValueError("repeat_last_n must be non-negative")
+
 
 @dataclass
 class StorageConfig:
@@ -47,12 +117,12 @@ class StorageConfig:
 
     # Backend selection
     vector_backend: str = "lancedb"  # LanceDB is the default and only vector store
-    use_graph: bool = True           # Enable KuzuDB graph store
+    use_graph: bool = True  # Enable KuzuDB graph store
 
     # Paths (auto-set in Config.__post_init__)
-    db_path: Optional[Path] = None       # SQLite
-    lance_path: Optional[Path] = None    # LanceDB
-    kuzu_path: Optional[Path] = None     # KuzuDB
+    db_path: Optional[Path] = None  # SQLite
+    lance_path: Optional[Path] = None  # LanceDB
+    kuzu_path: Optional[Path] = None  # KuzuDB
 
 
 @dataclass
@@ -81,7 +151,9 @@ class MemoryConfig:
     """Developer memory configuration."""
 
     enabled: bool = True  # Enable memory learning
-    global_dir: Optional[Path] = None  # Global memory directory (default: ~/.codesage/developer)
+    global_dir: Optional[Path] = (
+        None  # Global memory directory (default: ~/.codesage/developer)
+    )
     learn_on_index: bool = True  # Learn patterns during indexing
     min_pattern_confidence: float = 0.5  # Minimum confidence for patterns
     min_pattern_occurrences: int = 2  # Minimum occurrences to store pattern
@@ -138,43 +210,69 @@ class Config:
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     docs: DocsConfig = field(default_factory=DocsConfig)
-    exclude_dirs: List[str] = field(default_factory=lambda: [
-        # Version control
-        ".git", ".svn", ".hg",
-        # Python
-        "venv", "env", ".venv", ".env",
-        "__pycache__", ".pytest_cache", ".mypy_cache",
-        "build", "dist", "*.egg-info",
-        ".tox", ".nox",
-        # JavaScript/TypeScript
-        "node_modules", ".next", ".nuxt",
-        # Go
-        "vendor",
-        # Rust
-        "target",
-        # IDE/Tools
-        ".codesage", ".idea", ".vscode",
-    ])
-    include_extensions: List[str] = field(default_factory=lambda: [
-        # Python
-        ".py",
-        # JavaScript
-        ".js", ".jsx", ".mjs", ".cjs",
-        # TypeScript
-        ".ts", ".tsx", ".mts", ".cts",
-        # Go
-        ".go",
-        # Rust
-        ".rs",
-    ])
+    exclude_dirs: List[str] = field(
+        default_factory=lambda: [
+            # Version control
+            ".git",
+            ".svn",
+            ".hg",
+            # Python
+            "venv",
+            "env",
+            ".venv",
+            ".env",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            "build",
+            "dist",
+            "*.egg-info",
+            ".tox",
+            ".nox",
+            # JavaScript/TypeScript
+            "node_modules",
+            ".next",
+            ".nuxt",
+            # Go
+            "vendor",
+            # Rust
+            "target",
+            # IDE/Tools
+            ".codesage",
+            ".idea",
+            ".vscode",
+        ]
+    )
+    include_extensions: List[str] = field(
+        default_factory=lambda: [
+            # Python
+            ".py",
+            # JavaScript
+            ".js",
+            ".jsx",
+            ".mjs",
+            ".cjs",
+            # TypeScript
+            ".ts",
+            ".tsx",
+            ".mts",
+            ".cts",
+            # Go
+            ".go",
+            # Rust
+            ".rs",
+        ]
+    )
 
     def __post_init__(self):
         """Post-initialization processing."""
         self.project_path = Path(self.project_path).resolve()
 
         # Backward compatibility: convert 'language' string to 'languages' list
-        if hasattr(self, 'language') and isinstance(getattr(self, 'language', None), str):
-            lang = getattr(self, 'language')
+        if hasattr(self, "language") and isinstance(
+            getattr(self, "language", None), str
+        ):
+            lang = getattr(self, "language")
             if lang and lang not in self.languages:
                 self.languages = [lang] + [l for l in self.languages if l != lang]
 
@@ -247,7 +345,7 @@ class Config:
             performance=PerformanceConfig(**performance_data),
             features=FeaturesConfig(**features_data),
             docs=DocsConfig(**docs_data),
-            **data
+            **data,
         )
 
     def save(self) -> None:
@@ -276,6 +374,23 @@ class Config:
                 "request_timeout": self.llm.request_timeout,
                 "connect_timeout": self.llm.connect_timeout,
                 "max_retries": self.llm.max_retries,
+                # Advanced Ollama parameters
+                "context_window": self.llm.context_window,
+                "num_predict": self.llm.num_predict,
+                "top_k": self.llm.top_k,
+                "top_p": self.llm.top_p,
+                "repeat_penalty": self.llm.repeat_penalty,
+                "repeat_last_n": self.llm.repeat_last_n,
+                # Token management
+                "token_bucket_size": self.llm.token_bucket_size,
+                "token_bucket_refill_rate": self.llm.token_bucket_refill_rate,
+                # Text processing
+                "chunk_size": self.llm.chunk_size,
+                "chunk_overlap": self.llm.chunk_overlap,
+                # Custom sequences
+                "stop_sequences": self.llm.stop_sequences,
+                # Model-specific parameters
+                "model_parameters": self.llm.model_parameters,
             },
             "storage": {
                 "vector_backend": self.storage.vector_backend,
@@ -327,7 +442,7 @@ class Config:
 def initialize_project(
     project_path: Path,
     model: str = "qwen2.5-coder:7b",
-    embedding_model: str = "qwen3-embedding",
+    embedding_model: str = "nomic-embed-text",
     auto_detect: bool = True,
 ) -> Config:
     """Initialize CodeSage in a project directory.
@@ -358,6 +473,7 @@ def initialize_project(
     if auto_detect:
         try:
             from codesage.utils.language_detector import detect_languages
+
             detected_info = detect_languages(project_path)
             if detected_info:
                 languages = [lang.name for lang in detected_info]

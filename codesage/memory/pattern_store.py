@@ -31,13 +31,12 @@ class PatternStore:
     """
 
     TABLE_NAME = "patterns"
-    VECTOR_DIM = 4096  # qwen3-embedding default dimension
 
     def __init__(
         self,
         persist_dir: Union[str, Path],
+        vector_dim: int,
         embedding_fn: Optional[EmbeddingFunction] = None,
-        vector_dim: int = VECTOR_DIM,
     ) -> None:
         """Initialize the pattern store.
 
@@ -86,8 +85,12 @@ class PatternStore:
                     self._db.drop_table(self.TABLE_NAME)
                 else:
                     return table
-            except Exception:
-                return table
+            except Exception as e:
+                logger.warning(f"Error checking table schema, recreating: {e}")
+                try:
+                    self._db.drop_table(self.TABLE_NAME)
+                except Exception:
+                    pass
 
         # Define schema for patterns
         schema = pa.schema(
@@ -104,7 +107,15 @@ class PatternStore:
             ]
         )
 
-        return self._db.create_table(self.TABLE_NAME, schema=schema)
+        try:
+            return self._db.create_table(self.TABLE_NAME, schema=schema)
+        except Exception as e:
+            logger.error(f"Failed to create table: {e}")
+            try:
+                self._db.drop_table(self.TABLE_NAME)
+            except Exception:
+                pass
+            return self._db.create_table(self.TABLE_NAME, schema=schema)
 
     def set_embedding_fn(self, embedding_fn: EmbeddingFunction) -> None:
         """Set the embedding function.
@@ -133,7 +144,7 @@ class PatternStore:
         if callable(self._embedding_fn):
             # If it's a direct callable
             return self._embedding_fn(texts)
-        elif hasattr(self._embedding_fn, 'embed_documents'):
+        elif hasattr(self._embedding_fn, "embed_documents"):
             # If it's a Langchain Embeddings object
             return self._embedding_fn.embed_documents(texts)
         else:
@@ -297,7 +308,9 @@ class PatternStore:
         """
         # Get the pattern's embedding
         try:
-            results = self._table.search().where(f"id = '{pattern_id}'").limit(1).to_pandas()
+            results = (
+                self._table.search().where(f"id = '{pattern_id}'").limit(1).to_pandas()
+            )
         except Exception as e:
             logger.warning(f"Failed to get pattern {pattern_id}: {e}")
             return []
@@ -353,7 +366,9 @@ class PatternStore:
             Pattern data or None if not found.
         """
         try:
-            results = self._table.search().where(f"id = '{pattern_id}'").limit(1).to_pandas()
+            results = (
+                self._table.search().where(f"id = '{pattern_id}'").limit(1).to_pandas()
+            )
         except Exception as e:
             logger.warning(f"Failed to get pattern {pattern_id}: {e}")
             return None

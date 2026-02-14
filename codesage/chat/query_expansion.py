@@ -84,7 +84,6 @@ class QueryExpander:
             "login",
             "logout",
             "session",
-            "token",
             "credential",
             "password",
             "oauth",
@@ -285,7 +284,10 @@ class QueryExpander:
         try:
             from codesage.llm.provider import LLMProvider
             from codesage.utils.config import LLMConfig
-            from codesage.llm.prompts import QUERY_EXPANSION_PROMPT, QUERY_EXPANSION_SYSTEM
+            from codesage.llm.prompts import (
+                QUERY_EXPANSION_PROMPT,
+                QUERY_EXPANSION_SYSTEM,
+            )
             import json
 
             llm = self.llm or LLMProvider(LLMConfig())
@@ -310,7 +312,9 @@ class QueryExpander:
             if response_text.startswith("```"):
                 # Strip markdown code block
                 lines = response_text.split("\n")
-                response_text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+                response_text = "\n".join(
+                    lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+                )
 
             parsed = json.loads(response_text)
 
@@ -357,7 +361,9 @@ class QueryExpander:
                 intent=intent,
                 intent_confidence=parsed.get("confidence", 0.5),
                 expanded_terms=search_terms,
-                enhanced_query=query + " " + " ".join(search_terms) if search_terms else query,
+                enhanced_query=query + " " + " ".join(search_terms)
+                if search_terms
+                else query,
                 context_additions={},
                 is_ambiguous=parsed.get("is_ambiguous", False),
                 ambiguity_hints=[],
@@ -597,8 +603,9 @@ class QueryExpander:
         suggestions = []
 
         for term, options in self.AMBIGUOUS_TERMS.items():
-            # Check if term appears in query or expanded terms
-            if term in query_lower or term in expanded_terms:
+            # Only check if term appears as a whole word in the original query
+            # Don't flag expanded terms to avoid false positives from synonyms
+            if re.search(rf"\b{re.escape(term)}\b", query_lower):
                 ambiguous_terms_found.append(term)
                 suggestions.extend(options)
 

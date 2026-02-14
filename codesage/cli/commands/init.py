@@ -20,10 +20,10 @@ def init(
         help="Ollama model to use for analysis",
     ),
     embedding_model: str = typer.Option(
-        "qwen3-embedding",
+        "nomic-embed-text",
         "--embedding-model",
         "-e",
-        help="Embedding model (qwen3-embedding recommended, 32K context for code)",
+        help="Embedding model (nomic-embed-text recommended, lightweight and fast)",
     ),
     no_detect: bool = typer.Option(
         False,
@@ -48,12 +48,15 @@ def init(
         console.print("[dim]Scanning project for languages...[/dim]")
         try:
             from codesage.utils.language_detector import detect_languages
+
             detected = detect_languages(project_path)
 
             if detected:
                 tree = Tree("🔍 [bold]Detected Languages[/bold]")
                 for lang_info in detected:
-                    tree.add(f"{lang_info.name.capitalize()} ({lang_info.file_count} files)")
+                    tree.add(
+                        f"{lang_info.name.capitalize()} ({lang_info.file_count} files)"
+                    )
                 console.print(tree)
                 console.print()
         except Exception:
@@ -90,4 +93,3 @@ def init(
     console.print(f"     [cyan]ollama pull {embedding_model}[/cyan]")
     console.print("  3. Index your codebase: [cyan]codesage index[/cyan]")
     console.print("  4. Start chatting: [cyan]codesage chat[/cyan]\n")
-

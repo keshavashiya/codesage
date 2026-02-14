@@ -10,37 +10,51 @@ from typing import Optional
 
 
 class RateLimiter:
-    """Token bucket rate limiter for API calls.
+    """Enhanced token bucket rate limiter for API calls.
 
     Thread-safe implementation that limits requests per minute
-    using the token bucket algorithm.
+    using the token bucket algorithm with configurable bucket size
+    and refill rate for optimal performance and accuracy.
     """
 
-    def __init__(self, requests_per_minute: int = 60):
+    def __init__(
+        self,
+        requests_per_minute: int = 60,
+        bucket_size: Optional[int] = None,
+        refill_rate: Optional[int] = None,
+    ):
         """Initialize the rate limiter.
 
         Args:
             requests_per_minute: Maximum requests allowed per minute
+            bucket_size: Token bucket size (defaults to requests_per_minute)
+            refill_rate: Tokens per minute refill rate (defaults to requests_per_minute)
         """
         self.rpm = max(1, requests_per_minute)
-        self.tokens = float(self.rpm)
+        # Use provided values or default to rpm
+        self.bucket_size = bucket_size if bucket_size is not None else self.rpm
+        self.refill_rate = refill_rate if refill_rate is not None else self.rpm
+
+        # Initialize tokens to bucket size for burst handling
+        self.tokens = float(self.bucket_size)
         self.last_update = time.monotonic()
         self._lock = threading.Lock()
 
-        # Metrics
+        # Enhanced metrics
         self.total_requests = 0
         self.total_waits = 0
         self.total_wait_time = 0.0
+        self.peak_wait_time = 0.0
 
     def _refill_tokens(self) -> None:
-        """Refill tokens based on elapsed time."""
+        """Refill tokens based on configured refill rate."""
         now = time.monotonic()
         elapsed = now - self.last_update
         self.last_update = now
 
-        # Add tokens proportional to time elapsed
-        tokens_to_add = elapsed * (self.rpm / 60.0)
-        self.tokens = min(self.rpm, self.tokens + tokens_to_add)
+        # Calculate tokens to add based on refill rate
+        tokens_to_add = elapsed * (self.refill_rate / 60.0)
+        self.tokens = min(self.bucket_size, self.tokens + tokens_to_add)
 
     def acquire(self, timeout: Optional[float] = None) -> bool:
         """Acquire a token, blocking if necessary.
@@ -75,6 +89,9 @@ class RateLimiter:
                 # Track wait metrics
                 self.total_waits += 1
                 self.total_wait_time += wait_time
+                # Track peak wait time for performance monitoring
+                if wait_time > self.peak_wait_time:
+                    self.peak_wait_time = wait_time
 
                 # Release lock during sleep
                 self._lock.release()
@@ -115,15 +132,19 @@ class RateLimiter:
                     if self.total_waits > 0
                     else 0.0
                 ),
+                "peak_wait_time_ms": self.peak_wait_time * 1000,
                 "current_tokens": self.tokens,
+                "bucket_size": self.bucket_size,
+                "refill_rate": self.refill_rate,
                 "requests_per_minute": self.rpm,
             }
 
     def reset(self) -> None:
         """Reset the rate limiter state and metrics."""
         with self._lock:
-            self.tokens = float(self.rpm)
+            self.tokens = float(self.bucket_size)
             self.last_update = time.monotonic()
             self.total_requests = 0
             self.total_waits = 0
             self.total_wait_time = 0.0
+            self.peak_wait_time = 0.0

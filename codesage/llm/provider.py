@@ -16,18 +16,46 @@ from codesage.utils.logging import get_logger
 logger = get_logger("llm.provider")
 
 
+def _build_model_kwargs(config: LLMConfig) -> Dict[str, Any]:
+    """Build comprehensive model parameters for Ollama.
+
+    Args:
+        config: LLM configuration
+
+    Returns:
+        Dictionary of model parameters for Ollama
+    """
+    params: Dict[str, Any] = {
+        # Core parameters
+        "num_ctx": config.context_window,
+        "num_predict": config.num_predict,
+        "top_k": config.top_k,
+        "top_p": config.top_p,
+        "repeat_penalty": config.repeat_penalty,
+        "repeat_last_n": config.repeat_last_n,
+    }
+
+    # Add model-specific parameters
+    params.update(config.model_parameters)
+
+    return params
+
+
 class LLMProviderError(Exception):
     """Base exception for LLM provider errors."""
+
     pass
 
 
 class LLMConnectionError(LLMProviderError):
     """Raised when unable to connect to LLM service."""
+
     pass
 
 
 class LLMTimeoutError(LLMProviderError):
     """Raised when LLM request times out."""
+
     pass
 
 
@@ -52,7 +80,12 @@ class LLMProvider:
         """
         self.config = config
         self._llm: Optional[BaseChatModel] = None
-        self._rate_limiter = RateLimiter(requests_per_minute)
+        # Use config-based rate limiting with enhanced token bucket
+        self._rate_limiter = RateLimiter(
+            requests_per_minute=requests_per_minute,
+            bucket_size=config.token_bucket_size,
+            refill_rate=config.token_bucket_refill_rate,
+        )
         self._init_llm()
 
     def _init_llm(self) -> None:
@@ -60,15 +93,22 @@ class LLMProvider:
         timeout = self.config.request_timeout
 
         if self.config.provider == "ollama":
+            # Build model parameters for enhanced Ollama configuration
+            model_kwargs = _build_model_kwargs(self.config)
+
             self._llm = ChatOllama(
                 model=self.config.model,
                 base_url=self.config.base_url,
                 temperature=self.config.temperature,
                 timeout=timeout,  # Add timeout
+                # Pass additional parameters via model_kwargs
+                model_kwargs=model_kwargs,
+                stop=self.config.stop_sequences,
             )
         elif self.config.provider == "openai":
             try:
                 from langchain_openai import ChatOpenAI
+
                 self._llm = ChatOpenAI(
                     model=self.config.model,
                     api_key=self.config.api_key,
@@ -85,6 +125,7 @@ class LLMProvider:
         elif self.config.provider == "anthropic":
             try:
                 from langchain_anthropic import ChatAnthropic
+
                 self._llm = ChatAnthropic(
                     model=self.config.model,
                     api_key=self.config.api_key,
@@ -160,7 +201,9 @@ class LLMProvider:
         def _invoke_llm():
             try:
                 response = self._llm.invoke(messages)
-                return response.content if hasattr(response, 'content') else str(response)
+                return (
+                    response.content if hasattr(response, "content") else str(response)
+                )
             except TimeoutError as e:
                 raise LLMTimeoutError(f"LLM request timed out: {e}") from e
             except ConnectionError as e:
@@ -208,7 +251,9 @@ class LLMProvider:
         def _invoke_chat():
             try:
                 response = self._llm.invoke(lc_messages)
-                return response.content if hasattr(response, 'content') else str(response)
+                return (
+                    response.content if hasattr(response, "content") else str(response)
+                )
             except TimeoutError as e:
                 raise LLMTimeoutError(f"Chat request timed out: {e}") from e
             except ConnectionError as e:
@@ -245,13 +290,15 @@ class LLMProvider:
 
         try:
             for chunk in self._llm.stream(lc_messages):
-                content = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                content = chunk.content if hasattr(chunk, "content") else str(chunk)
                 if content:
                     yield content
         except TimeoutError as e:
             raise LLMTimeoutError(f"Stream request timed out: {e}") from e
         except ConnectionError as e:
-            raise LLMConnectionError(f"Failed to connect to LLM for streaming: {e}") from e
+            raise LLMConnectionError(
+                f"Failed to connect to LLM for streaming: {e}"
+            ) from e
 
     def is_available(self) -> bool:
         """Check if the LLM is available and configured."""
@@ -286,4 +333,3 @@ def create_llm_provider(config: Config) -> LLMProvider:
         Configured LLM provider
     """
     return LLMProvider(config.llm)
-

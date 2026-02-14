@@ -35,13 +35,12 @@ class LanceVectorStore(VectorStoreBase):
     """
 
     TABLE_NAME = "code_elements"
-    VECTOR_DIM = 4096  # qwen3-embedding default dimension
 
     def __init__(
         self,
         persist_dir: Union[str, Path],
         embedding_fn: EmbeddingFunction,
-        vector_dim: int = VECTOR_DIM,
+        vector_dim: int,
     ) -> None:
         """Initialize the LanceDB vector store.
 
@@ -88,10 +87,15 @@ class LanceVectorStore(VectorStoreBase):
                         f"expected {self.vector_dim}. Recreating table."
                     )
                     self._db.drop_table(self.TABLE_NAME)
+                    # Force fresh table creation below
                 else:
                     return table
-            except Exception:
-                return table
+            except Exception as e:
+                logger.warning(f"Error checking table schema, recreating: {e}")
+                try:
+                    self._db.drop_table(self.TABLE_NAME)
+                except Exception:
+                    pass
 
         # Define schema for code elements
         schema = pa.schema(
@@ -109,7 +113,16 @@ class LanceVectorStore(VectorStoreBase):
         )
 
         # Create empty table with schema
-        return self._db.create_table(self.TABLE_NAME, schema=schema)
+        try:
+            return self._db.create_table(self.TABLE_NAME, schema=schema)
+        except Exception as e:
+            # If creation fails, try to drop and recreate
+            logger.error(f"Failed to create table: {e}")
+            try:
+                self._db.drop_table(self.TABLE_NAME)
+            except Exception:
+                pass
+            return self._db.create_table(self.TABLE_NAME, schema=schema)
 
     def _embed(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for texts.
@@ -146,7 +159,9 @@ class LanceVectorStore(VectorStoreBase):
 
         # Prepare data for insertion
         data = []
-        for i, (doc_id, doc, embedding) in enumerate(zip(ids, truncated_docs, embeddings)):
+        for i, (doc_id, doc, embedding) in enumerate(
+            zip(ids, truncated_docs, embeddings)
+        ):
             metadata = metadatas[i] if metadatas else {}
             data.append(
                 {

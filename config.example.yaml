@@ -1,0 +1,148 @@
+# Example CodeSage Configuration with Enhanced Ollama Settings
+# Save this as .codesage/config.yaml in your project root
+
+project_name: "my-awesome-project"
+languages:
+  - python
+  - typescript
+
+# LLM Configuration with Enhanced Ollama Parameters
+llm:
+  # Basic Settings
+  provider: ollama
+  model: qwen2.5-coder:14b
+  embedding_model: qwen3-embedding
+  base_url: http://localhost:11434
+  temperature: 0.3
+  max_tokens: 500
+  
+  # Network Settings
+  request_timeout: 30.0
+  connect_timeout: 5.0
+  max_retries: 3
+  
+  # Advanced Model Parameters
+  context_window: 32768          # Maximum context window size
+  num_predict: 128               # Maximum tokens to predict
+  top_k: 40                      # Top-k sampling (0-100, 0 disables)
+  top_p: 0.9                     # Top-p sampling (0.0-1.0)
+  repeat_penalty: 1.1            # Repetition penalty (1.0 = disabled)
+  repeat_last_n: 64              # Tokens to consider for repetition
+  
+  # Token Management (Rate Limiting)
+  token_bucket_size: 1000        # Token bucket size for burst handling
+  token_bucket_refill_rate: 60   # Tokens per minute refill rate
+  
+  # Text Processing (Embeddings)
+  chunk_size: 512                # Text chunking size for embeddings
+  chunk_overlap: 50              # Overlap between chunks (must be < chunk_size)
+  
+  # Custom Stop Sequences
+  stop_sequences:
+    - "\n\n"
+    - "```"
+    - "###"
+  
+  # Model-Specific Parameters (passed directly to Ollama)
+  model_parameters:
+    num_ctx: 32768                # Context window (overrides context_window)
+    num_thread: 4                 # Number of CPU threads
+    num_gpu: 1                    # Number of GPU layers
+    main_gpu: 0                   # Main GPU device
+    low_vram: false               # Low VRAM mode
+    f16_kv: true                  # 16-bit key/value tensors
+    logits_all: false             # Return logits for all tokens
+    vocab_only: false             # Only return vocabulary
+    use_mmap: true                # Use memory mapping
+    use_mlock: false              # Lock model in memory
+    embedding_only: false         # Only generate embeddings
+
+# Storage Configuration
+storage:
+  vector_backend: lancedb
+  use_graph: true
+
+# Security Configuration
+security:
+  enabled: true
+  severity_threshold: medium
+  block_on_critical: true
+  custom_patterns: []
+  ignore_rules: []
+
+# Git Hooks Configuration
+hooks:
+  pre_commit_enabled: true
+  run_security_scan: true
+  run_review: false
+  severity_threshold: medium
+
+# Developer Memory Configuration
+memory:
+  enabled: true
+  learn_on_index: true
+  min_pattern_confidence: 0.5
+  min_pattern_occurrences: 2
+
+# Performance Configuration
+performance:
+  embedding_batch_size: 200
+  max_elements_per_batch: 200
+  embedding_cache_size: 1000
+  cache_enabled: true
+
+# Feature Flags
+features:
+  embeddings: true
+  memory: true
+  llm_explanations: true
+  graph_storage: true
+  context_provider_mode: false
+  graph_enriched_search: false
+  code_smell_detection: false
+  docs_generation: false
+  cross_project_recommendations: false
+
+# Documentation Configuration
+docs:
+  output_dir: "docs"
+  format: "markdown"
+
+# Project-Specific Settings
+exclude_dirs:
+  - ".git"
+  - ".svn"
+  - ".hg"
+  - "venv"
+  - "env"
+  - ".venv"
+  - ".env"
+  - "__pycache__"
+  - ".pytest_cache"
+  - ".mypy_cache"
+  - "build"
+  - "dist"
+  - "*.egg-info"
+  - ".tox"
+  - ".nox"
+  - "node_modules"
+  - ".next"
+  - ".nuxt"
+  - "vendor"
+  - "target"
+  - ".codesage"
+  - ".idea"
+  - ".vscode"
+
+include_extensions:
+  - ".py"
+  - ".js"
+  - ".jsx"
+  - ".mjs"
+  - ".cjs"
+  - ".ts"
+  - ".tsx"
+  - ".mts"
+  - ".cts"
+  - ".go"
+  - ".rs"

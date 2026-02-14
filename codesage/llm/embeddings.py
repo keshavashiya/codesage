@@ -55,11 +55,13 @@ class _InstructionEmbeddings(Embeddings):
 
 class EmbeddingError(Exception):
     """Base exception for embedding errors."""
+
     pass
 
 
 class EmbeddingModelError(EmbeddingError):
     """Non-retryable model error (e.g. NaN output, invalid input)."""
+
     pass
 
 
@@ -82,12 +84,13 @@ class EmbeddingService:
         - Configurable timeouts
     """
 
-    # Max characters to embed
+    # Max characters to embed - will be configured based on context_window
     # qwen3-embedding: 32K tokens (~96000 chars) — default model
     # mxbai-embed-large: 512 tokens (~1500 chars)
-    # nomic-embed-text: 8192 tokens (~24000 chars)
-    # 8000 chars covers most functions/classes without being wasteful
-    MAX_CHARS = 8000
+    # nomic-embed-text: 8192 tokens (~24000 chars) - but API limit is much lower
+    # Default 4000 chars is safe for all models including nomic-embed-text
+    DEFAULT_MAX_CHARS = 4000
+    MAX_CHARS = 4000  # Instance-level override initialized here
 
     def __init__(
         self,
@@ -107,6 +110,14 @@ class EmbeddingService:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.performance = performance or PerformanceConfig()
         self._cache_enabled = bool(self.performance.cache_enabled)
+
+        # Apply chunking configuration from config
+        self.chunk_size = self.config.chunk_size
+        self.chunk_overlap = self.config.chunk_overlap
+
+        # Configure MAX_CHARS based on context_window for optimal performance
+        # Use context_window * 3 as rough char estimate (avg 3 chars per token)
+        self.MAX_CHARS = min(self.config.context_window * 3, self.DEFAULT_MAX_CHARS)
 
         self._embedder: Embeddings = self._init_embedder()
         self._memory_cache: Optional[_EmbeddingLRU] = None
@@ -139,6 +150,7 @@ class EmbeddingService:
         elif self.config.provider == "openai":
             try:
                 from langchain_openai import OpenAIEmbeddings
+
                 return OpenAIEmbeddings(
                     model=self.config.embedding_model,
                     api_key=self.config.api_key,
@@ -173,18 +185,44 @@ class EmbeddingService:
         """Get the embedding vector dimension by probing the model.
 
         Embeds a short test string and caches the result.
+        Falls back to deriving from model name if probing fails.
 
         Returns:
             Integer dimension of the embedding vectors.
         """
         if not hasattr(self, "_vector_dim"):
+            # Try probing first
             try:
                 vec = self._embedder.embed_query("dimension probe")
                 self._vector_dim = len(vec)
                 logger.info(f"Detected embedding dimension: {self._vector_dim}")
+                return self._vector_dim
             except Exception as e:
-                logger.warning(f"Failed to probe embedding dimension, defaulting to 4096: {e}")
-                self._vector_dim = 4096
+                logger.warning(f"Failed to probe embedding dimension: {e}")
+
+            # Fallback: derive from model name
+            model = self.config.embedding_model.lower()
+            dim_map = {
+                "nomic-embed-text": 768,
+                "text-embedding-ada-002": 1536,
+                "text-embedding-3-small": 1536,
+                "text-embedding-3-large": 3072,
+                "qwen2-embedding": 1024,
+                "mxbai-embed-large": 1024,
+            }
+            for model_name, dim in dim_map.items():
+                if model_name in model:
+                    self._vector_dim = dim
+                    logger.info(
+                        f"Derived embedding dimension {dim} from model: {model}"
+                    )
+                    return self._vector_dim
+
+            # Last resort - require explicit config
+            raise ValueError(
+                f"Cannot determine embedding dimension for model '{self.config.embedding_model}'. "
+                f"Please configure embedding_dimension in config.yaml or use a known model."
+            )
         return self._vector_dim
 
     @staticmethod
@@ -201,9 +239,9 @@ class EmbeddingService:
             Cleaned text safe for embedding
         """
         # Remove NUL bytes and other control characters (keep \n, \t, \r)
-        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
         # Collapse runs of blank lines (>3 consecutive newlines → 2)
-        text = re.sub(r'\n{4,}', '\n\n\n', text)
+        text = re.sub(r"\n{4,}", "\n\n\n", text)
         # Strip leading/trailing whitespace
         text = text.strip()
         # Ensure non-empty (models can NaN on empty string)
@@ -224,7 +262,7 @@ class EmbeddingService:
         if len(text) <= self.MAX_CHARS:
             return text
         # Truncate and add indicator
-        return text[:self.MAX_CHARS - 20] + "\n... [truncated]"
+        return text[: self.MAX_CHARS - 20] + "\n... [truncated]"
 
     def embed(self, text: str, use_cache: bool = True) -> List[float]:
         """Generate embedding for text.
@@ -310,6 +348,7 @@ class EmbeddingService:
             return [self.embed(texts[0], use_cache=use_cache)]
 
         if not use_cache:
+
             @self._retry
             def _embed_all():
                 try:
@@ -321,6 +360,7 @@ class EmbeddingService:
                             f"Model error (not retryable): {e}"
                         ) from e
                     raise EmbeddingError(f"Batch embedding failed: {e}") from e
+
             return _embed_all()
 
         # Check cache for each text
@@ -341,6 +381,7 @@ class EmbeddingService:
 
         # Generate embeddings for uncached texts with retry
         if uncached_texts:
+
             @self._retry
             def _embed_uncached():
                 try:

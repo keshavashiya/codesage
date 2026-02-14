@@ -35,18 +35,22 @@ class StorageManager:
     def __init__(
         self,
         config: "Config",
+        vector_dim: int = None,
         embedding_fn=None,
-        vector_dim: int = 0,
     ) -> None:
         """Initialize storage manager with all backends.
 
         Args:
             config: CodeSage configuration
             embedding_fn: Embedding function for vector store (required for LanceDB)
-            vector_dim: Embedding vector dimension (0 = use store default)
+            vector_dim: Embedding vector dimension (auto-derived from model if not provided)
         """
         self.config = config
         self._embedding_fn = embedding_fn
+
+        # Derive vector_dim if not provided
+        if vector_dim is None:
+            vector_dim = self._derive_dimension_from_config()
         self._vector_dim = vector_dim
 
         # Initialize SQLite database
@@ -60,9 +64,26 @@ class StorageManager:
         self._use_graph = config.storage.use_graph
 
         logger.info(
-            f"StorageManager initialized: "
-            f"vector=lancedb, graph={self._use_graph}"
+            f"StorageManager initialized: vector=lancedb, graph={self._use_graph}"
         )
+
+    def _derive_dimension_from_config(self) -> int:
+        """Derive embedding dimension from config model name."""
+        model = self.config.llm.embedding_model.lower()
+        dim_map = {
+            "nomic-embed-text": 768,
+            "text-embedding-ada-002": 1536,
+            "text-embedding-3-small": 1536,
+            "text-embedding-3-large": 3072,
+            "qwen2-embedding": 1024,
+            "mxbai-embed-large": 1024,
+        }
+        for model_name, dim in dim_map.items():
+            if model_name in model:
+                logger.info(f"Derived embedding dimension {dim} from model: {model}")
+                return dim
+        logger.warning(f"Unknown embedding model '{model}', defaulting to 768")
+        return 768  # Safe default for nomic-embed-text
 
     @property
     def vector_store(self):
@@ -70,7 +91,10 @@ class StorageManager:
         if self._vector_store is not None:
             return self._vector_store
 
-        from codesage.storage.lance_store import LanceVectorStore, create_lance_embedding_fn
+        from codesage.storage.lance_store import (
+            LanceVectorStore,
+            create_lance_embedding_fn,
+        )
 
         if self._embedding_fn is None:
             raise ValueError("embedding_fn required for LanceDB")
@@ -81,9 +105,8 @@ class StorageManager:
         kwargs = {
             "persist_dir": self.config.storage.lance_path,
             "embedding_fn": embed_fn,
+            "vector_dim": self._vector_dim,
         }
-        if self._vector_dim > 0:
-            kwargs["vector_dim"] = self._vector_dim
 
         self._vector_store = LanceVectorStore(**kwargs)
         logger.debug("Initialized LanceDB vector store")
@@ -226,12 +249,16 @@ class StorageManager:
 
                     # For classes, add inheritance info
                     if metadata.get("type") == "class":
-                        result["superclasses"] = self.graph_store.get_superclasses(node_id)
+                        result["superclasses"] = self.graph_store.get_superclasses(
+                            node_id
+                        )
                         result["subclasses"] = self.graph_store.get_subclasses(node_id)
 
                     # Additional graph enrichment if enabled
                     if getattr(self.config.features, "graph_enriched_search", False):
-                        result["dependencies"] = self.graph_store.get_dependencies(node_id)
+                        result["dependencies"] = self.graph_store.get_dependencies(
+                            node_id
+                        )
                         result["dependents"] = self.graph_store.get_dependents(node_id)
                         result["impact_score"] = self._calculate_impact_score(node_id)
 
