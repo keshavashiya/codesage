@@ -13,10 +13,11 @@ from codesage.cli.commands import (
     chat,
     index,
     init,
+    review,
 )
 
 # Import command groups
-from codesage.cli.groups import mcp
+from codesage.cli.groups import hook, mcp
 
 # Import signal handling
 from codesage.cli.utils.signals import setup_signal_handlers
@@ -39,12 +40,14 @@ app = typer.Typer(
 app.command()(init)
 app.command()(index)
 app.command()(chat)
+app.command()(review)
 
 # ============================================================================
 # Command Groups
 # ============================================================================
 
 app.add_typer(mcp.app, name="mcp")
+app.add_typer(hook.app, name="hook")
 
 
 # Version callback for --version flag

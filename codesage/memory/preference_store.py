@@ -5,13 +5,11 @@ Follows the ConnectionManager pattern from codesage.storage.base.
 """
 
 import json
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, List, Optional
 
-from codesage.storage.base import ConnectionManager, DatabaseError
+from codesage.storage.base import ConnectionManager
 from codesage.utils.logging import get_logger
 
 from .models import (
@@ -529,14 +527,6 @@ class PreferenceStore(ConnectionManager):
             total_elements: New element count (optional).
             patterns_learned: New patterns count (optional).
         """
-        # Whitelist of allowed columns for security
-        allowed_columns = {
-            "total_files",
-            "total_elements",
-            "patterns_learned",
-            "last_indexed",
-        }
-
         updates: List[str] = []
         params: List[Any] = []
 

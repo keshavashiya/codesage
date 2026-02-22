@@ -47,18 +47,11 @@ class DiffExtractor:
 
     def get_all_changes(self) -> List[FileChange]:
         """Get all uncommitted changes (staged + unstaged + untracked)."""
-        staged = self._get_changes(staged=True)
-        unstaged = self._get_changes(staged=False)
+        # HEAD diff includes both staged and unstaged changes for tracked files
+        tracked_changes = self._get_changes(revision="HEAD")
         untracked = self._get_untracked_files()
-
-        staged_paths = {f.path for f in staged}
-        all_changes = staged + [f for f in unstaged if f.path not in staged_paths]
-
-        # Add untracked files that aren't already in the list
-        existing_paths = {f.path for f in all_changes}
-        all_changes.extend([f for f in untracked if f.path not in existing_paths])
-
-        return all_changes
+        
+        return tracked_changes + untracked
 
     def _get_untracked_files(self) -> List[FileChange]:
         """Get list of untracked files (new files not yet added to git)."""
@@ -142,15 +135,15 @@ class DiffExtractor:
         non_printable = sum(1 for c in sample if ord(c) < 32 and c not in '\n\r\t')
         return non_printable > len(sample) * 0.3  # More than 30% non-printable
 
-    def _get_changes(self, staged: bool = True) -> List[FileChange]:
+    def _get_changes(self, staged: bool = True, revision: Optional[str] = None) -> List[FileChange]:
         """Get file changes from git."""
-        file_stats = self._get_file_stats(staged)
-        file_statuses = self._get_file_statuses(staged)
+        file_stats = self._get_file_stats(staged, revision)
+        file_statuses = self._get_file_statuses(staged, revision)
 
         changes = []
         for path, (status, old_path) in file_statuses.items():
             adds, dels = file_stats.get(path, (0, 0))
-            diff = self._get_file_diff(path, staged)
+            diff = self._get_file_diff(path, staged, revision)
 
             changes.append(FileChange(
                 path=Path(path),
@@ -163,10 +156,12 @@ class DiffExtractor:
 
         return changes
 
-    def _get_file_stats(self, staged: bool) -> dict:
+    def _get_file_stats(self, staged: bool, revision: Optional[str] = None) -> dict:
         """Get addition/deletion stats per file."""
         cmd = ["git", "diff", "--numstat", "--diff-filter=ACDMR"]
-        if staged:
+        if revision:
+            cmd.insert(2, revision)
+        elif staged:
             cmd.insert(2, "--cached")
 
         result = self._run_git(cmd)
@@ -186,10 +181,12 @@ class DiffExtractor:
 
         return stats
 
-    def _get_file_statuses(self, staged: bool) -> dict:
+    def _get_file_statuses(self, staged: bool, revision: Optional[str] = None) -> dict:
         """Get status (A/M/D/R) per file."""
         cmd = ["git", "diff", "--name-status", "--diff-filter=ACDMR"]
-        if staged:
+        if revision:
+            cmd.insert(2, revision)
+        elif staged:
             cmd.insert(2, "--cached")
 
         result = self._run_git(cmd)
@@ -208,10 +205,12 @@ class DiffExtractor:
 
         return statuses
 
-    def _get_file_diff(self, path: str, staged: bool) -> str:
+    def _get_file_diff(self, path: str, staged: bool, revision: Optional[str] = None) -> str:
         """Get diff content for a specific file."""
         cmd = ["git", "diff"]
-        if staged:
+        if revision:
+            cmd.append(revision)
+        elif staged:
             cmd.append("--cached")
         cmd.extend(["--", path])
 

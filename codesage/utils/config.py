@@ -143,7 +143,10 @@ class HooksConfig:
     pre_commit_enabled: bool = True
     run_security_scan: bool = True
     run_review: bool = False
+    run_patterns: bool = True
     severity_threshold: str = "medium"
+    mode: str = "fast"  # fast (static only) or full (includes LLM)
+    auto_fix: bool = False  # Auto-fix simple issues on commit
 
 
 @dataclass
@@ -292,6 +295,11 @@ class Config:
         return self.languages[0] if self.languages else "python"
 
     @property
+    def primary_language(self) -> str:
+        """Get primary language for current project."""
+        return self.language
+
+    @property
     def codesage_dir(self) -> Path:
         """Get .codesage directory path."""
         return self.project_path / ".codesage"
@@ -407,7 +415,10 @@ class Config:
                 "pre_commit_enabled": self.hooks.pre_commit_enabled,
                 "run_security_scan": self.hooks.run_security_scan,
                 "run_review": self.hooks.run_review,
+                "run_patterns": self.hooks.run_patterns,
                 "severity_threshold": self.hooks.severity_threshold,
+                "mode": self.hooks.mode,
+                "auto_fix": self.hooks.auto_fix,
             },
             "memory": {
                 "enabled": self.memory.enabled,

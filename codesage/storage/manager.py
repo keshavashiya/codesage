@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from codesage.storage.database import Database
-from codesage.storage.kuzu_store import CodeNode, CodeRelationship
+from codesage.storage.kuzu_store import CodeRelationship
 from codesage.models.code_element import CodeElement
 from codesage.utils.logging import get_logger
 
@@ -37,6 +37,7 @@ class StorageManager:
         config: "Config",
         vector_dim: int = None,
         embedding_fn=None,
+        read_only: bool = False,
     ) -> None:
         """Initialize storage manager with all backends.
 
@@ -44,9 +45,11 @@ class StorageManager:
             config: CodeSage configuration
             embedding_fn: Embedding function for vector store (required for LanceDB)
             vector_dim: Embedding vector dimension (auto-derived from model if not provided)
+            read_only: Open graph store in read-only mode (safe for concurrent chat sessions).
         """
         self.config = config
         self._embedding_fn = embedding_fn
+        self._read_only = read_only
 
         # Derive vector_dim if not provided
         if vector_dim is None:
@@ -126,7 +129,8 @@ class StorageManager:
             from codesage.storage.kuzu_store import KuzuGraphStore
 
             self._graph_store = KuzuGraphStore(
-                persist_dir=self.config.storage.kuzu_path
+                persist_dir=self.config.storage.kuzu_path,
+                read_only=self._read_only,
             )
             logger.debug("Initialized KuzuDB graph store")
         except ImportError:

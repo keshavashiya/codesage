@@ -13,9 +13,7 @@ from codesage.utils.logging import get_logger
 from .models import (
     CodeStructure,
     LearnedPattern,
-    PatternCategory,
     ProjectInfo,
-    RelationshipType,
     StructureType,
 )
 
@@ -107,7 +105,7 @@ class MemoryGraph:
                 },
             )
         except Exception as e:
-            logger.warning(f"Failed to add pattern node {pattern.id}: {e}")
+            logger.debug(f"Failed to add pattern node {pattern.id}: {e}")
 
     def get_pattern_node(self, pattern_id: str) -> Optional[Dict[str, Any]]:
         """Get a pattern node by ID.
@@ -154,7 +152,7 @@ class MemoryGraph:
                 {"id": pattern_id},
             )
         except Exception as e:
-            logger.warning(f"Failed to delete pattern node {pattern_id}: {e}")
+            logger.debug(f"Failed to delete pattern node {pattern_id}: {e}")
 
     # ==================== Project Node Operations ====================
 
@@ -191,7 +189,7 @@ class MemoryGraph:
                 },
             )
         except Exception as e:
-            logger.warning(f"Failed to add project node {project.name}: {e}")
+            logger.debug(f"Failed to add project node {project.name}: {e}")
 
     def get_project_node(self, project_name: str) -> Optional[Dict[str, Any]]:
         """Get a project node by name.
@@ -244,7 +242,7 @@ class MemoryGraph:
                 },
             )
         except Exception as e:
-            logger.warning(f"Failed to add structure node {structure.id}: {e}")
+            logger.debug(f"Failed to add structure node {structure.id}: {e}")
 
     def get_preferred_structures(
         self,
@@ -332,7 +330,7 @@ class MemoryGraph:
                     {"id1": pattern1_id, "id2": pattern2_id, "correlation": correlation},
                 )
         except Exception as e:
-            logger.warning(f"Failed to add co-occurrence {pattern1_id}->{pattern2_id}: {e}")
+            logger.debug(f"Failed to add co-occurrence {pattern1_id}->{pattern2_id}: {e}")
 
     def get_cooccurring_patterns(
         self,
@@ -408,7 +406,7 @@ class MemoryGraph:
                     },
                 )
         except Exception as e:
-            logger.warning(f"Failed to link pattern {pattern_id} to project {project_id}: {e}")
+            logger.debug(f"Failed to link pattern {pattern_id} to project {project_id}: {e}")
 
     def get_pattern_projects(self, pattern_id: str) -> List[Dict[str, Any]]:
         """Get projects where a pattern was learned.
@@ -453,7 +451,7 @@ class MemoryGraph:
                 {"id1": project1_id, "id2": project2_id, "similarity": similarity},
             )
         except Exception as e:
-            logger.warning(f"Failed to add project similarity: {e}")
+            logger.debug(f"Failed to add project similarity: {e}")
 
     def find_similar_projects(
         self,
@@ -508,7 +506,7 @@ class MemoryGraph:
                 },
             )
         except Exception as e:
-            logger.warning(f"Failed to add pattern evolution: {e}")
+            logger.debug(f"Failed to add pattern evolution: {e}")
 
     def add_structure_preference(
         self,
@@ -551,7 +549,7 @@ class MemoryGraph:
                     {"pattern_id": pattern_id, "structure_id": structure_id, "confidence": confidence},
                 )
         except Exception as e:
-            logger.warning(f"Failed to add structure preference: {e}")
+            logger.debug(f"Failed to add structure preference: {e}")
 
     # ==================== Graph Analysis ====================
 
@@ -754,7 +752,7 @@ class MemoryGraph:
 
             logger.info("Cleared all nodes and relationships from MemoryGraph")
         except Exception as e:
-            logger.warning(f"Error clearing graph: {e}")
+            logger.debug(f"Error clearing graph: {e}")
 
     def get_metrics(self) -> Dict[str, Any]:
         """Get graph metrics.

@@ -7,7 +7,7 @@ Requires the tree-sitter package and corresponding language grammars.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional
 
 from codesage.parsers.base import BaseParser
 from codesage.models.code_element import CodeElement
@@ -125,8 +125,6 @@ class TreeSitterParser(BaseParser):
                 "Install with: pipx inject pycodesage 'pycodesage[multi-language]' (or pip install 'pycodesage[multi-language]')"
             )
 
-        # Import the language grammar module
-        grammar_module = self._config["grammar_module"]
         try:
             if self._language == "typescript" and self._config.get("use_tsx"):
                 # TypeScript has separate TS and TSX grammars

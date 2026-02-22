@@ -181,7 +181,7 @@ class TestLanceVectorStoreQuery:
         """Test querying empty store."""
         from codesage.storage.lance_store import LanceVectorStore
 
-        empty_store = LanceVectorStore(tmp_path / "empty", mock_embedder)
+        empty_store = LanceVectorStore(tmp_path / "empty", mock_embedder, vector_dim=1024)
         results = empty_store.query("test")
 
         assert results == []

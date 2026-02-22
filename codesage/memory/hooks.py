@@ -11,7 +11,7 @@ from codesage.utils.logging import get_logger
 
 from .learning_engine import LearningEngine
 from .memory_manager import MemoryManager
-from .models import InteractionRecord, LearnedPattern, ProjectInfo
+from .models import LearnedPattern, ProjectInfo
 
 logger = get_logger("memory.hooks")
 
@@ -98,6 +98,7 @@ class MemoryHooks:
         elements: List[Dict[str, Any]],
         project_name: str,
         file_path: Optional[Path] = None,
+        language: Optional[str] = None,
     ) -> List[LearnedPattern]:
         """Called when code elements are indexed.
 
@@ -107,6 +108,7 @@ class MemoryHooks:
             elements: List of code element dictionaries.
             project_name: Name of the project.
             file_path: Optional path to the source file.
+            language: Primary programming language of the elements (default: auto-detected).
 
         Returns:
             List of learned patterns.
@@ -116,11 +118,15 @@ class MemoryHooks:
 
         self._ensure_initialized()
 
+        # Determine language dynamically
+        language = language or (elements[0].get("language", "python") if elements else "python")
+
         try:
             patterns = self._engine.learn_from_elements(
                 elements,
                 project_name,
                 file_path.parent if file_path else None,
+                language=language,
             )
 
             self._elements_processed += len(elements)
@@ -222,7 +228,7 @@ class MemoryHooks:
             )
 
         except Exception as e:
-            logger.warning(f"Failed to record project: {e}")
+            logger.debug(f"Failed to record project: {e}")
 
     def on_query(
         self,

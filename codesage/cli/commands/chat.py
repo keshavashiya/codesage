@@ -27,7 +27,7 @@ def chat(
         help="Disable automatic code context retrieval",
     ),
     max_context: int = typer.Option(
-        3,
+        5,
         "--max-context",
         "-c",
         help="Maximum code snippets to include in context",
@@ -38,11 +38,29 @@ def chat(
     Ask questions in natural language and get answers with
     relevant code context.
 
-    Commands available in chat:
-      /help    - Show available commands
-      /search  - Search codebase
-      /clear   - Clear conversation
-      /exit    - Exit chat
+    \b
+    Search & Analysis:
+      /search <query>     Semantic code search
+      /deep <query>       Deep multi-agent analysis
+      /similar <element>  Find similar code patterns
+      /patterns [query]   Show learned codebase patterns
+
+    \b
+    Planning & Review:
+      /plan <task>        Generate implementation plan
+      /review [file]      Review code changes
+      /security [path]    Security analysis
+      /impact <element>   Impact / blast-radius analysis
+
+    \b
+    Session:
+      /mode <mode>        Switch mode: brainstorm / implement / review
+      /context            Show or modify context settings
+      /stats              Show index statistics
+      /export [file]      Export conversation history
+      /clear              Clear conversation history
+      /help               Show full command reference
+      /exit               Exit chat (also Ctrl+D)
     """
     from codesage.chat import ChatEngine
     from codesage.utils.config import Config
@@ -198,7 +216,7 @@ def _stream_response(console: Console, engine: "ChatEngine", user_input: str) ->
         )
 
     if exiting:
-        console.print(f"\n[dim]Goodbye![/dim]")
+        console.print("\n[dim]Goodbye![/dim]")
     else:
         console.print()
 

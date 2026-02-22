@@ -1,0 +1,11 @@
+- id: codesage-review
+  name: CodeSage Review
+  description: "AI-powered code review using CodeSage (static analysis + semantic search + LLM)"
+  entry: codesage review
+  language: python
+  types: [text]
+  stages: [commit, push]
+  pass_filenames: false
+  require_serial: true
+  additional_dependencies:
+    - pycodesage

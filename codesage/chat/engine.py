@@ -1,6 +1,8 @@
 """Chat engine for interactive code conversations."""
 
-from dataclasses import dataclass, field
+import re
+import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple
@@ -10,6 +12,38 @@ from codesage.storage.database import Database
 from codesage.utils.config import Config
 from codesage.utils.logging import get_logger
 from codesage.core.context_provider import ContextProvider
+from codesage.memory.style_analyzer import StyleAnalyzer as _StyleAnalyzer
+
+# Single source of truth for Python-only pattern names (imported from StyleAnalyzer).
+_PYTHON_SPECIFIC_PATTERNS: frozenset = _StyleAnalyzer.PYTHON_ONLY_PATTERN_NAMES
+
+# Language-specific idiom notes appended to /plan prompts for non-Python projects.
+_LANG_IDIOM_NOTES: Dict[str, str] = {
+    "rust": (
+        "- Handle ownership and borrowing; avoid unnecessary `.clone()`.\n"
+        "- Use `Result`/`Option` for errors; avoid `.unwrap()` in library code.\n"
+        "- Add unit tests under `#[cfg(test)]` in the same file.\n"
+        "- Use `?` operator for error propagation."
+    ),
+    "go": (
+        "- Return explicit errors; do not panic in library code.\n"
+        "- Use interfaces for abstraction rather than concrete types.\n"
+        "- Add tests in a `*_test.go` file using the standard `testing` package.\n"
+        "- Keep goroutine lifetimes explicit; use contexts for cancellation."
+    ),
+    "javascript": (
+        "- Use `async`/`await` consistently; avoid mixing with raw `.then()`.\n"
+        "- Export new modules from the appropriate `index.js` entry point.\n"
+        "- Add tests in `*.test.js` using Jest or Vitest.\n"
+        "- Prefer `const` and `let` over `var`."
+    ),
+    "typescript": (
+        "- Define types/interfaces before implementation.\n"
+        "- Avoid `any`; use generics, union types, or `unknown` instead.\n"
+        "- Add tests in `*.spec.ts`.\n"
+        "- Export types explicitly for library code."
+    ),
+}
 
 from .commands import ChatCommand, ChatMode, CommandParser, ParsedCommand
 from .context import CodeContextBuilder
@@ -25,7 +59,6 @@ from .prompts import (
     MODE_CHANGED_TEMPLATE,
     MODE_DESCRIPTIONS,
     MODE_TIPS,
-    PLAN_TEMPLATE,
     REVIEW_CONTEXT_TEMPLATE,
     REVIEW_PROMPT,
 )
@@ -430,25 +463,54 @@ class ChatEngine:
         """
         if self._mode == ChatMode.BRAINSTORM:
             # Rich exploratory context
-            return self.context_builder.build_context(
+            base_context = self.context_builder.build_context(
                 query,
                 limit=self.max_context_results + 2,  # More context for exploration
             )
         elif self._mode == ChatMode.IMPLEMENT:
             # Focused implementation context
             impl_context = self.context_provider.get_implementation_context(query)
-            return self.context_provider.to_markdown(impl_context)
+            base_context = self.context_provider.to_markdown(impl_context)
         elif self._mode == ChatMode.REVIEW:
             # Review-focused context (code + patterns)
-            return self.context_builder.build_context(
+            base_context = self.context_builder.build_context(
                 query,
                 limit=self.max_context_results,
             )
         else:
-            return self.context_builder.build_context(
+            base_context = self.context_builder.build_context(
                 query,
                 limit=self.max_context_results,
             )
+
+        # Boost exact name matches: check any word ≥ 3 chars in the query against
+        # the SQLite element names. No assumptions about name casing conventions.
+        name_candidates = [w for w in re.split(r'\W+', query) if len(w) >= 3]
+        if name_candidates:
+            try:
+                db_path = str(self.config.storage.db_path)
+                conn = sqlite3.connect(db_path)
+                exact_snippets = []
+                for candidate in dict.fromkeys(name_candidates):  # preserve order, dedupe
+                    if candidate in base_context:
+                        continue
+                    row = conn.execute(
+                        "SELECT name, file, line_start, type FROM code_elements WHERE name = ? LIMIT 1",
+                        (candidate,),
+                    ).fetchone()
+                    if row:
+                        name, fpath, line, etype = row
+                        exact_snippets.append(
+                            f"**[Exact match]** `{name}` ({etype}) in `{fpath}:{line}`\n"
+                        )
+                conn.close()
+                if exact_snippets:
+                    header = "## Exact Name Matches\n" + "".join(exact_snippets) + "\n"
+                    base_context = header + base_context
+            except Exception:
+                pass
+
+        return base_context
 
     def _build_llm_messages(self, context: str = "") -> List[Dict[str, str]]:
         """Build message list for LLM API.
@@ -522,6 +584,7 @@ class ChatEngine:
         yield ("status", "Searching codebase...")
         context = ""
         code_refs = []
+        context_warning = ""
         if self.include_context:
             try:
                 context = self._build_mode_context(expanded.enhanced_query)
@@ -530,12 +593,24 @@ class ChatEngine:
                 )
                 self._update_conversation_context(code_refs, expanded)
             except Exception as e:
+                err_str = str(e)
                 logger.warning(f"Failed to build context: {e}")
+                if "lock" in err_str.lower() or "Could not set lock" in err_str:
+                    context_warning = (
+                        "⚠️ **Context unavailable** — another CodeSage session may be "
+                        "running. Responding without codebase context; answer may be less accurate."
+                    )
+                else:
+                    context_warning = (
+                        "⚠️ **Context retrieval failed** — responding without codebase context."
+                    )
 
         # 3. Yield context summary so CLI can show it immediately
         if code_refs:
             context_summary = self._format_context_summary(code_refs)
             yield ("context", context_summary)
+        elif context_warning:
+            yield ("context", context_warning)
 
         # 4. Stream LLM response
         messages = self._build_llm_messages(context)
@@ -792,8 +867,6 @@ class ChatEngine:
             return "Please provide a search query: /search <query>"
 
         try:
-            import re
-
             # Try multiple query strategies like /deep does
             search_queries = [query]
 
@@ -892,8 +965,6 @@ class ChatEngine:
                 search_queries.append(query.lower())
 
             # 2. Try space-separated (for camelCase/PascalCase)
-            import re
-
             spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", query)
             if spaced != query:
                 search_queries.append(spaced.lower())
@@ -1027,12 +1098,7 @@ class ChatEngine:
             # Check if we have meaningful context
             has_context = bool(context.relevant_code or context.patterns)
 
-            # Get list of files in context for prompt
-            files_in_context = (
-                ", ".join(set(ref.file.split("/")[-1] for ref in context.relevant_code))
-                if context.relevant_code
-                else "the retrieved files"
-            )
+            # (files_in_context removed — variable was unused)
 
             prompt = f"""You are a senior code architect analyzing the codebase. Provide a detailed, technical analysis based ONLY on the code provided below.
 
@@ -1149,6 +1215,20 @@ Be specific and technical - this is for a developer who knows programming but ne
                 else False
             )
 
+            # Build language-specific guidance for the LLM prompt
+            primary_lang = (
+                getattr(self.config, "primary_language", None) or "python"
+            ).lower()
+            if primary_lang != "python":
+                lang_note = (
+                    f"\n\nThis project is written in **{primary_lang}**. "
+                    f"All implementation steps, code examples, and idioms should use "
+                    f"{primary_lang} conventions (not Python). For example:\n"
+                    + _LANG_IDIOM_NOTES.get(primary_lang, "")
+                )
+            else:
+                lang_note = ""
+
             if has_relevant_code:
                 prompt = f"""You are CodeSage, an experienced pair programmer helping implement a feature.
 
@@ -1166,7 +1246,7 @@ Please provide a clear, actionable implementation plan that:
 5. Suggests testing strategies
 6. Maintains consistency with existing code patterns
 
-Write in a practical, developer-friendly tone. Be specific about what needs to change and where."""
+Write in a practical, developer-friendly tone. Be specific about what needs to change and where.{lang_note}"""
             else:
                 prompt = f"""You are CodeSage, an experienced pair programmer helping implement a feature.
 
@@ -1180,7 +1260,31 @@ IMPORTANT: No sufficiently relevant code was found in the codebase for this task
 Instead, respond with:
 1. A brief acknowledgment that the codebase doesn't have relevant code for this task
 2. Suggestions for what types of files might need to be created (e.g., 'you may need to create an auth module')
-3. Keep it concise - maximum 3-4 sentences"""
+3. Keep it concise - maximum 3-4 sentences{lang_note}"""
+
+            # Detect if the task mentions a programming language that CoDesage
+            # supports or intends to support. Derive the set dynamically from the
+            # parser registry (registered languages) plus any tree-sitter candidates
+            # declared in the parsers package — no hardcoded names.
+            try:
+                from codesage.parsers import ParserRegistry
+                from codesage.parsers import _TREESITTER_LANGUAGES as _ts_langs
+            except ImportError:
+                _ts_langs = []
+            _known_langs = set(ParserRegistry.supported_languages()) | set(_ts_langs)
+            has_lang = bool(_known_langs) and any(
+                lang in task.lower() for lang in _known_langs
+            )
+            if has_lang and primary_lang == "python":
+                # Only add the disambiguation note when the project is Python and
+                # the task mentions another language (avoids confusing non-Python projects)
+                prompt += (
+                    "\n\nIMPORTANT: The task mentions a programming language. "
+                    "Clarify in your plan whether this means:\n"
+                    "(a) Adding support/analysis for that language IN this Python codebase, OR\n"
+                    "(b) Implementing the feature USING that language.\n"
+                    "Be explicit about which interpretation you are using before listing steps."
+                )
 
             messages = [
                 {
@@ -1208,81 +1312,128 @@ Instead, respond with:
 
             review_context = []
 
-            # Run the hybrid analyzer if available
-            try:
-                from codesage.review.hybrid_analyzer import HybridReviewAnalyzer
+            # When a file path is given, use ReviewPipeline for richer static analysis
+            target_path = None
+            if target:
+                p = Path(target)
+                if not p.is_absolute():
+                    p = self.config.project_path / p
+                if p.exists() and p.is_file():
+                    target_path = p
 
-                analyzer = HybridReviewAnalyzer(
-                    config=self.config,
-                    repo_path=self.config.project_path,
-                )
+            if target_path:
+                try:
+                    from codesage.review.pipeline import ReviewPipeline
 
-                # Get changes
-                if target:
-                    all_changes = analyzer.get_all_changes()
-                    changes = [c for c in all_changes if str(c.path) == target]
-                    if not changes:
-                        return f"No uncommitted changes found for: {target}"
-                else:
-                    changes = analyzer.get_all_changes()
+                    pipeline = ReviewPipeline(
+                        repo_path=Path(self.config.project_path),
+                        config=self.config,
+                        mode="fast",
+                    )
+                    result = pipeline.run_on_file(target_path)
 
-                if not changes:
-                    return (
-                        "No uncommitted changes found. Make some changes and try again."
+                    review_context.append(f"## Code Review: {target}\n")
+                    review_context.append(f"**Summary:** {result.summary}\n")
+
+                    active = result.active_findings
+                    if active:
+                        critical = [f for f in active if f.severity == "critical"]
+                        high = [f for f in active if f.severity == "high"]
+                        warning = [f for f in active if f.severity == "warning"]
+                        suggestion = [f for f in active if f.severity == "suggestion"]
+
+                        for label, items in [
+                            ("Critical", critical),
+                            ("High", high),
+                            ("Warning", warning),
+                            ("Suggestion", suggestion),
+                        ]:
+                            if items:
+                                review_context.append(f"\n### {label} ({len(items)})\n")
+                                for issue in items[:5]:
+                                    review_context.append(f"- **[{issue.rule_id or issue.category}]** {issue.message}")
+                                    if issue.line:
+                                        review_context.append(f" (line {issue.line})")
+                                    review_context.append("\n")
+                                    if issue.suggestion:
+                                        review_context.append(f"  Fix: {issue.suggestion[:100]}\n")
+                    else:
+                        review_context.append("\nNo issues found!\n")
+
+                except ImportError:
+                    review_context.append(
+                        "*ReviewPipeline not available*\nRun `codesage review` from CLI for full analysis.\n"
                     )
 
-                # Run review
-                result = analyzer.review_changes(
-                    changes=changes,
-                    use_llm_synthesis=False,
-                )
-                self._last_review = result
+            # Run the hybrid analyzer for git-diff-based review (no file path or file has no static results)
+            if not target_path:
+                try:
+                    from codesage.review.hybrid_analyzer import HybridReviewAnalyzer
 
-                # Build review context from ReviewResult
-                review_context.append(f"## Code Review: {review_target}\n")
-                review_context.append(f"**Summary:** {result.summary}\n")
+                    analyzer = HybridReviewAnalyzer(
+                        config=self.config,
+                        repo_path=self.config.project_path,
+                    )
 
-                if result.issues:
-                    # Group by severity
-                    critical = [
-                        i for i in result.issues if i.severity.name == "CRITICAL"
-                    ]
-                    warning = [i for i in result.issues if i.severity.name == "WARNING"]
-                    info = [
-                        i
-                        for i in result.issues
-                        if i.severity.name not in ("CRITICAL", "WARNING")
-                    ]
+                    changes = analyzer.get_all_changes()
 
-                    if critical:
-                        review_context.append(f"\n### Critical ({len(critical)})\n")
-                        for issue in critical[:5]:
-                            review_context.append(f"- **{issue.message}**")
-                            if issue.file:
-                                review_context.append(f"  `{issue.file}:{issue.line}`")
-                            if issue.suggestion:
-                                review_context.append(
-                                    f"  Fix: {issue.suggestion[:100]}\n"
-                                )
+                    if not changes:
+                        return (
+                            "No uncommitted changes found. Make some changes and try again."
+                        )
 
-                    if warning:
-                        review_context.append(f"\n### Warnings ({len(warning)})\n")
-                        for issue in warning[:5]:
-                            review_context.append(f"- {issue.message}")
-                            if issue.file:
-                                review_context.append(f"  `{issue.file}:{issue.line}`")
+                    # Run review
+                    result = analyzer.review_changes(
+                        changes=changes,
+                        use_llm_synthesis=False,
+                    )
+                    self._last_review = result
 
-                    if info:
-                        review_context.append(f"\n### Info ({len(info)})\n")
-                        for issue in info[:3]:
-                            review_context.append(f"- {issue.message}")
-                else:
-                    review_context.append("\nNo issues found!\n")
+                    # Build review context from ReviewResult
+                    review_context.append(f"## Code Review: {review_target}\n")
+                    review_context.append(f"**Summary:** {result.summary}\n")
 
-            except ImportError:
-                review_context.append(
-                    "*HybridReviewAnalyzer not available*\nRun `codesage review` from CLI for full analysis.\n"
-                )
+                    if result.issues:
+                        # Group by severity
+                        critical = [
+                            i for i in result.issues if i.severity.name == "CRITICAL"
+                        ]
+                        warning = [i for i in result.issues if i.severity.name == "WARNING"]
+                        info = [
+                            i
+                            for i in result.issues
+                            if i.severity.name not in ("CRITICAL", "WARNING")
+                        ]
+
+                        if critical:
+                            review_context.append(f"\n### Critical ({len(critical)})\n")
+                            for issue in critical[:5]:
+                                review_context.append(f"- **{issue.message}**")
+                                if issue.file:
+                                    review_context.append(f"  `{issue.file}:{issue.line}`")
+                                if issue.suggestion:
+                                    review_context.append(
+                                        f"  Fix: {issue.suggestion[:100]}\n"
+                                    )
+
+                        if warning:
+                            review_context.append(f"\n### Warnings ({len(warning)})\n")
+                            for issue in warning[:5]:
+                                review_context.append(f"- {issue.message}")
+                                if issue.file:
+                                    review_context.append(f"  `{issue.file}:{issue.line}`")
+
+                        if info:
+                            review_context.append(f"\n### Info ({len(info)})\n")
+                            for issue in info[:3]:
+                                review_context.append(f"- {issue.message}")
+                    else:
+                        review_context.append("\nNo issues found!\n")
+
+                except ImportError:
+                    review_context.append(
+                        "*HybridReviewAnalyzer not available*\nRun `codesage review` from CLI for full analysis.\n"
+                    )
 
             # Build prompt for LLM to generate human-readable review
             context_str = "".join(review_context)
@@ -1461,9 +1612,6 @@ IMPORTANT: No security issues were found in this scan. Your response should ONLY
             return "Please provide an element: /impact <function or class name>"
 
         try:
-            import re
-            import sqlite3
-
             # First, try to find exact name match in database
             db_path = str(self.config.storage.db_path)
             conn = sqlite3.connect(db_path)
@@ -1531,9 +1679,14 @@ IMPORTANT: No security issues were found in this scan. Your response should ONLY
             try:
                 from codesage.storage.manager import StorageManager
 
-                storage = StorageManager(self.config)
+                storage = StorageManager(self.config, read_only=True)
                 if storage.graph_store:
-                    element_id = element_info.get("id", element)
+                    # Resolve element name → graph hash ID via find_nodes_by_name
+                    graph_nodes = storage.graph_store.find_nodes_by_name(element_name)
+                    if graph_nodes:
+                        element_id = graph_nodes[0].get("id", element_name)
+                    else:
+                        element_id = element_name
 
                     # Get dependents (what depends on this)
                     dependents = storage.graph_store.get_dependents(element_id)
@@ -1569,7 +1722,7 @@ IMPORTANT: No security issues were found in this scan. Your response should ONLY
 
                     # Calculate impact metrics
                     impact_score = len(callers) + len(dependents)
-                    impact_context.append(f"\n### Impact Metrics\n")
+                    impact_context.append("\n### Impact Metrics\n")
                     impact_context.append(f"- Total callers: {len(callers)}\n")
                     impact_context.append(f"- Total dependents: {len(dependents)}\n")
                     impact_context.append(f"- Combined impact score: {impact_score}\n")
@@ -1629,9 +1782,21 @@ Write in a clear, actionable tone suitable for developers planning changes."""
             if not patterns:
                 return "No patterns learned yet. Keep using CodeSage!"
 
+            # Filter Python-specific patterns for non-Python projects
+            primary_lang = self.config.primary_language.lower()
+            if primary_lang != "python":
+                def _is_python_pattern(p) -> bool:
+                    name = p.name if hasattr(p, "name") else (p.get("name", "") if isinstance(p, dict) else "")
+                    return name in _PYTHON_SPECIFIC_PATTERNS
+                filtered = [p for p in patterns if not _is_python_pattern(p)]
+                if filtered:
+                    patterns = filtered
+                # If all filtered, keep original but note the language mismatch in the prompt
+
             # Build patterns context for LLM
             patterns_context = []
             patterns_context.append(f"## Code Patterns in {self.config.project_name}\n")
+            patterns_context.append(f"*Primary language: {primary_lang}*\n")
 
             if query:
                 patterns_context.append(f"*Showing patterns related to: {query}*\n\n")
@@ -1657,11 +1822,16 @@ Write in a clear, actionable tone suitable for developers planning changes."""
 
             # Build prompt for LLM
             context_str = "".join(patterns_context)
+            lang_note = (
+                f"This is a {primary_lang} project. "
+                if primary_lang != "python"
+                else ""
+            )
             prompt = f"""You are CodeSage, analyzing coding patterns detected in a codebase.
 
 {context_str}
 
-Please provide an analysis that:
+{lang_note}Please provide an analysis that:
 1. Summarizes the key patterns observed in this codebase
 2. Groups related patterns into categories (e.g., error handling, data access, architecture)
 3. Explains what these patterns reveal about the codebase's design philosophy
@@ -1669,6 +1839,7 @@ Please provide an analysis that:
 5. Suggests how developers should follow these patterns in new code
 6. Notes any patterns that might be candidates for standardization or improvement
 
+Do NOT reference Python conventions for non-Python projects. Frame patterns in the context of {primary_lang} idioms.
 Write in an informative tone that helps developers understand and adopt these patterns."""
 
             messages = [
@@ -1691,19 +1862,41 @@ Write in an informative tone that helps developers understand and adopt these pa
             return "Please provide an element: /similar <function or class name>"
 
         try:
-            import re
+            # First, try to find exact element in SQLite and build a rich query
+            # from its signature/docstring for better semantic matching
+            rich_query = None
+            try:
+                db_path = str(self.config.storage.db_path)
+                conn = sqlite3.connect(db_path)
+                cursor = conn.execute(
+                    "SELECT name, type, signature, docstring FROM code_elements WHERE name = ? LIMIT 1",
+                    (element,),
+                )
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    name, etype, sig, doc = row
+                    parts = [f"{etype}: {name}"]
+                    if sig:
+                        parts.append(sig)
+                    if doc:
+                        parts.append(doc[:300])
+                    rich_query = "\n".join(parts)
+            except Exception:
+                pass
 
-            # Try multiple query strategies
-            search_queries = [element]
-
-            # 1. Try lowercase
-            if element.lower() != element:
-                search_queries.append(element.lower())
-
-            # 2. Try space-separated
-            spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", element)
-            if spaced != element:
-                search_queries.append(spaced.lower())
+            # Try multiple query strategies; use rich_query as primary if available
+            if rich_query:
+                search_queries = [rich_query, element]
+            else:
+                search_queries = [element]
+                # 1. Try lowercase
+                if element.lower() != element:
+                    search_queries.append(element.lower())
+                # 2. Try space-separated
+                spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", element)
+                if spaced != element:
+                    search_queries.append(spaced.lower())
 
             # Search with multiple queries and collect all results
             all_results = []
@@ -1762,6 +1955,19 @@ Write in an informative tone that helps developers understand and adopt these pa
                     f"*...and {len(similar) - 5} more similar elements*\n"
                 )
 
+            # Build language-specific context note
+            primary_lang = (
+                getattr(self.config, "primary_language", None) or "python"
+            ).lower()
+            if primary_lang != "python":
+                lang_context = (
+                    f"\nThis codebase is written in {primary_lang}. "
+                    f"Frame your similarity analysis using {primary_lang} idioms, "
+                    f"naming conventions, and refactoring patterns."
+                )
+            else:
+                lang_context = ""
+
             # Build prompt for LLM
             context_str = "".join(similar_context)
             prompt = f"""You are CodeSage, analyzing similar code elements to help with refactoring or standardization.
@@ -1776,7 +1982,7 @@ Please provide an analysis that:
 5. Recommends whether to keep them separate or unify them
 6. Suggests next steps for the developer
 
-Write in a practical, developer-friendly tone focused on code quality and maintainability."""
+Write in a practical, developer-friendly tone focused on code quality and maintainability.{lang_context}"""
 
             messages = [
                 {
@@ -1809,7 +2015,6 @@ Write in a practical, developer-friendly tone focused on code quality and mainta
         if mode_str not in valid_modes:
             return f"Invalid mode. Choose: {', '.join(valid_modes)}"
 
-        old_mode = self._mode
         self._mode = ChatMode(mode_str)
 
         # Update system prompt

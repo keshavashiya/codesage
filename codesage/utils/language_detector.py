@@ -43,6 +43,14 @@ EXTENSION_TO_LANGUAGE: Dict[str, str] = {
     ".rs": "rust",
 }
 
+# Extensions supported by generic (non-Python) static checks
+GENERIC_EXTENSIONS: frozenset = frozenset(
+    ext for ext, lang in EXTENSION_TO_LANGUAGE.items() if lang != "python"
+)
+
+# All extensions with any static analysis support
+SUPPORTED_EXTENSIONS: frozenset = frozenset(EXTENSION_TO_LANGUAGE.keys())
+
 # Supported languages (those we have parsers for)
 SUPPORTED_LANGUAGES: Set[str] = {"python", "javascript", "typescript", "go", "rust"}
 

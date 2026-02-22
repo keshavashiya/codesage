@@ -14,6 +14,30 @@ from codesage.utils.logging import get_logger
 
 logger = get_logger("context.provider")
 
+# Language-specific implementation steps appended to the plan for non-Python projects.
+_LANGUAGE_STEPS: Dict[str, List[str]] = {
+    "rust": [
+        "Handle ownership and borrowing — avoid unnecessary clones.",
+        "Use Result/Option for errors — avoid .unwrap() in library code.",
+        "Add unit tests under #[cfg(test)] in the same file.",
+    ],
+    "go": [
+        "Return explicit errors — do not panic in library code.",
+        "Use interfaces for abstraction rather than concrete types.",
+        "Add tests in a *_test.go file using the standard testing package.",
+    ],
+    "javascript": [
+        "Use async/await consistently — avoid mixing with raw .then().",
+        "Export new modules from the appropriate index.js entry point.",
+        "Add tests in *.test.js using Jest or Vitest.",
+    ],
+    "typescript": [
+        "Define types/interfaces before implementation.",
+        "Avoid 'any' — use generics, union types, or unknown instead.",
+        "Add tests in *.spec.ts.",
+    ],
+}
+
 
 class ContextProvider:
     """Assemble rich context packs for AI IDEs and developers."""
@@ -104,10 +128,12 @@ class ContextProvider:
             except Exception as e:
                 logger.debug(f"Memory lookup failed: {e}")
 
+        primary_lang = (getattr(self.config, "language", None) or "python").lower()
         plan = self._generate_plan(
             task_description,
             patterns=patterns,
             suggested_files=target_files or [r.file for r in relevant_code],
+            language=primary_lang,
         )
 
         security = self._derive_security_guidance(task_description)
@@ -215,6 +241,7 @@ class ContextProvider:
         task_description: str,
         patterns: List[Dict[str, Any]],
         suggested_files: List[str],
+        language: str = "python",
     ) -> ImplementationPlan:
         steps = [
             "Review existing relevant code paths and patterns.",
@@ -231,6 +258,10 @@ class ContextProvider:
                 "Verify behavior with local checks (lint/test/run).",
             ]
         )
+
+        # Append language-specific guidance steps
+        lang_steps = _LANGUAGE_STEPS.get(language, [])
+        steps.extend(lang_steps)
 
         return ImplementationPlan(
             steps=steps,

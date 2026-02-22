@@ -41,11 +41,13 @@ class Suggester:
         # Detect embedding dimension from model
         self._vector_dim = self.embedder.get_dimension()
 
-        # Initialize unified storage manager (uses LanceDB for vectors)
+        # Initialize unified storage manager in read-only mode for graph store.
+        # This allows concurrent chat sessions without KuzuDB lock conflicts.
         self.storage = StorageManager(
             config=config,
             embedding_fn=self.embedder,
             vector_dim=self._vector_dim,
+            read_only=True,
         )
 
         # Legacy compatibility

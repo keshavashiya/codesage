@@ -171,7 +171,7 @@ class TestEnhancedOllamaConfig:
         assert config.token_bucket_refill_rate == 60
         assert config.chunk_size == 512
         assert config.chunk_overlap == 50
-        assert config.stop_sequences == ["\n\n", "```"]
+        assert config.stop_sequences == []
         assert config.model_parameters == {}
 
     def test_parameter_validation_temperature(self):

@@ -1,0 +1,16 @@
+# Files and folders excluded from codesage review
+# Path patterns (glob) — exclude entire file from all checks
+tests/**
+**/test_*.py
+**/test_*.rs
+**/test_*.go
+**/*_test.go
+**/*_test.rs
+**/*.spec.ts
+**/*.spec.js
+**/*.test.ts
+**/*.test.js
+**/spec/**
+docs/**
+build/**
+dist/**

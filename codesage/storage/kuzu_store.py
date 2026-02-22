@@ -73,11 +73,13 @@ class KuzuGraphStore:
         - ACID compliant
     """
 
-    def __init__(self, persist_dir: Union[str, Path]) -> None:
+    def __init__(self, persist_dir: Union[str, Path], read_only: bool = False) -> None:
         """Initialize the KuzuDB graph store.
 
         Args:
             persist_dir: Directory for KuzuDB persistence.
+            read_only: Open in read-only mode (allows concurrent readers, no writes).
+                       Use True for chat/search to avoid lock conflicts during indexing.
         """
         try:
             import kuzu
@@ -88,16 +90,18 @@ class KuzuGraphStore:
             )
 
         self.persist_dir = Path(persist_dir)
+        self._read_only = read_only
 
         # Ensure parent directory exists (Kuzu 0.11+ creates the db dir itself)
         self.persist_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        # Initialize database - Kuzu will create the persist_dir
-        self._db = kuzu.Database(str(self.persist_dir))
+        # Initialize database - read_only=True allows concurrent access from chat/search
+        self._db = kuzu.Database(str(self.persist_dir), read_only=read_only)
         self._conn = kuzu.Connection(self._db)
 
-        # Initialize schema
-        self._init_schema()
+        # Initialize schema (skipped in read-only mode)
+        if not read_only:
+            self._init_schema()
 
     def _init_schema(self) -> None:
         """Initialize graph schema with node and relationship tables."""
@@ -207,10 +211,11 @@ class KuzuGraphStore:
             rel: CodeRelationship to add.
         """
         try:
+            result = None
             # Build query based on relationship type
             if rel.rel_type == "CALLS":
                 call_line = rel.metadata.get("call_line", 0) if rel.metadata else 0
-                self._conn.execute(
+                result = self._conn.execute(
                     """
                     MATCH (a:CodeNode {id: $source_id}), (b:CodeNode {id: $target_id})
                     MERGE (a)-[r:CALLS]->(b)
@@ -224,7 +229,7 @@ class KuzuGraphStore:
                 )
             elif rel.rel_type == "IMPORTS":
                 import_type = rel.metadata.get("import_type", "module") if rel.metadata else "module"
-                self._conn.execute(
+                result = self._conn.execute(
                     """
                     MATCH (a:CodeNode {id: $source_id}), (b:CodeNode {id: $target_id})
                     MERGE (a)-[r:IMPORTS]->(b)
@@ -237,7 +242,7 @@ class KuzuGraphStore:
                     },
                 )
             elif rel.rel_type == "INHERITS":
-                self._conn.execute(
+                result = self._conn.execute(
                     """
                     MATCH (a:CodeNode {id: $source_id}), (b:CodeNode {id: $target_id})
                     MERGE (a)-[:INHERITS]->(b)
@@ -245,7 +250,7 @@ class KuzuGraphStore:
                     {"source_id": rel.source_id, "target_id": rel.target_id},
                 )
             elif rel.rel_type == "CONTAINS":
-                self._conn.execute(
+                result = self._conn.execute(
                     """
                     MATCH (a:CodeNode {id: $source_id}), (b:CodeNode {id: $target_id})
                     MERGE (a)-[:CONTAINS]->(b)
@@ -254,7 +259,7 @@ class KuzuGraphStore:
                 )
             elif rel.rel_type == "USES":
                 usage_type = rel.metadata.get("usage_type", "reference") if rel.metadata else "reference"
-                self._conn.execute(
+                result = self._conn.execute(
                     """
                     MATCH (a:CodeNode {id: $source_id}), (b:CodeNode {id: $target_id})
                     MERGE (a)-[r:USES]->(b)
@@ -266,6 +271,21 @@ class KuzuGraphStore:
                         "usage_type": usage_type,
                     },
                 )
+
+            # Detect silent MATCH failures: MATCH+MERGE returns 0 tuples when
+            # either node is not found in the graph (IDs not yet stored).
+            if result is not None:
+                try:
+                    if result.get_num_tuples() == 0:
+                        logger.debug(
+                            "Skipping %s %s→%s: node(s) not in graph",
+                            rel.rel_type,
+                            rel.source_id,
+                            rel.target_id,
+                        )
+                except Exception:
+                    pass  # get_num_tuples() not available in all kuzu versions
+
         except Exception as e:
             logger.warning(f"Failed to add relationship {rel.source_id}->{rel.target_id}: {e}")
 

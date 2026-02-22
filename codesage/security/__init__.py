@@ -10,13 +10,11 @@ from codesage.security.models import (
     Severity,
 )
 from codesage.security.scanner import SecurityScanner
-from codesage.security.formatters import ReportFormatter
 
 __all__ = [
     "SecurityRule",
     "SecurityFinding",
     "SecurityReport",
     "SecurityScanner",
-    "ReportFormatter",
     "Severity",
 ]

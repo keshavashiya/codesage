@@ -437,9 +437,6 @@ class HybridReviewAnalyzer:
         """Parse LLM synthesis response into ReviewIssues."""
         issues = []
 
-        # Map file paths from contexts for validation
-        valid_files = {str(ctx.file_path) for ctx in contexts}
-
         current_issue = None
         current_suggestion_lines = []
 
@@ -555,7 +552,7 @@ class HybridReviewAnalyzer:
             if ctx.security_issues:
                 summary += f" ({len(ctx.security_issues)} security issues)"
             if ctx.similar_code:
-                summary += f" (similar to existing code)"
+                summary += " (similar to existing code)"
             analysis_summary.append(summary)
 
         prompt = f"""Generate a concise PR description for these changes.

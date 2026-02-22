@@ -7,8 +7,6 @@ compared to ChromaDB, making it ideal for local-first code intelligence.
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
-import numpy as np
-
 from codesage.storage.vector_base import VectorStoreBase
 from codesage.utils.logging import get_logger
 

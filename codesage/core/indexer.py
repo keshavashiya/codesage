@@ -25,7 +25,11 @@ from codesage.llm.embeddings import EmbeddingService
 from codesage.storage.manager import StorageManager
 from codesage.models.code_element import CodeElement
 from codesage.memory.hooks import MemoryHooks
-from codesage.core.relationship_extractor import extract_relationships_from_file
+from codesage.core.relationship_extractor import (
+    extract_relationships_from_file,
+    extract_cross_file_calls,
+)
+from codesage.utils.language_detector import EXTENSION_TO_LANGUAGE
 
 logger = get_logger("indexer")
 
@@ -201,13 +205,15 @@ class Indexer:
             # Update file hash
             self.db.set_file_hash(file_path, self._compute_file_hash(file_path))
 
-            # Learn patterns from indexed elements
+            # Learn patterns from indexed elements (language-aware)
             if self._memory_hooks:
                 element_dicts = [el.to_dict() for el in elements]
+                file_language = EXTENSION_TO_LANGUAGE.get(file_path.suffix.lower(), "python")
                 self._memory_hooks.on_elements_indexed(
                     element_dicts,
                     self.config.project_name,
                     file_path,
+                    language=file_language,
                 )
 
             self.stats["files_indexed"] += 1
@@ -293,6 +299,12 @@ class Indexer:
         # Phase 2: Generate embeddings with progress
         self._flush_batch_embeddings(show_progress=show_progress)
 
+        # Phase 3: Cross-file CALLS pass (Python only)
+        # After all elements are stored, we have a global name→element map
+        # and can find calls that cross file boundaries.
+        if self.config.storage.use_graph and self.storage.graph_store:
+            self._run_cross_file_calls_pass()
+
         # Update database stats from actual DB counts (not run delta)
         if self.stats["files_indexed"] > 0:
             total_files = self.db.conn.execute(
@@ -371,13 +383,15 @@ class Indexer:
             # Update file hash
             self.db.set_file_hash(file_path, self._compute_file_hash(file_path))
 
-            # Learn patterns from indexed elements
+            # Learn patterns from indexed elements (language-aware)
             if self._memory_hooks:
                 element_dicts = [el.to_dict() for el in elements]
+                file_language = EXTENSION_TO_LANGUAGE.get(file_path.suffix.lower(), "python")
                 self._memory_hooks.on_elements_indexed(
                     element_dicts,
                     self.config.project_name,
                     file_path,
+                    language=file_language,
                 )
 
             self.stats["files_indexed"] += 1
@@ -451,6 +465,64 @@ class Indexer:
         self._batch_elements = []
         self._batch_file_count = 0
         self._defer_embeddings = False
+
+    def _run_cross_file_calls_pass(self) -> None:
+        """Third indexing phase: extract cross-file CALLS relationships.
+
+        Queries all elements from SQLite, builds a global name→element map,
+        then re-parses every Python file to find calls where the callee is
+        defined in a different file.  Same-file edges were already stored in
+        the first pass; KuzuDB MERGE semantics prevent duplicates.
+        """
+        try:
+            # Build global element map from SQLite (include line numbers for cross-file callers)
+            rows = self.db.conn.execute(
+                "SELECT id, name, file, type, line_start, line_end "
+                "FROM code_elements WHERE type IN ('function','method','class')"
+            ).fetchall()
+
+            if not rows:
+                return
+
+            global_elements: Dict[str, Any] = {}
+            file_to_elements: Dict[str, List[Any]] = {}
+            for row_id, name, fpath, etype, line_start, line_end in rows:
+                # Build a lightweight stub with all fields the extractors need
+                stub = type(
+                    "Stub",
+                    (),
+                    {
+                        "id": row_id,
+                        "name": name,
+                        "file": fpath,
+                        "type": etype,
+                        "line_start": line_start or 1,
+                        "line_end": line_end or 1,
+                    },
+                )()
+                if name not in global_elements:  # first occurrence wins
+                    global_elements[name] = stub
+                file_to_elements.setdefault(fpath, []).append(stub)
+
+            cross_file_total = 0
+            for fpath_str, file_stubs in file_to_elements.items():
+                fpath = Path(fpath_str)
+                if not fpath.exists():
+                    continue
+                try:
+                    new_rels = extract_cross_file_calls(fpath, file_stubs, global_elements)  # type: ignore[arg-type]
+                    if new_rels:
+                        self.storage.add_relationships(new_rels)
+                        cross_file_total += len(new_rels)
+                except Exception as e:
+                    logger.warning(f"Cross-file call extraction failed for {fpath}: {e}")
+
+            if cross_file_total:
+                logger.info(f"Cross-file pass: added {cross_file_total} CALLS edges")
+                self.stats["relationships_added"] += cross_file_total
+
+        except Exception as e:
+            logger.warning(f"Cross-file calls pass failed: {e}")
 
     def clear_index(self) -> None:
         """Clear all indexed data from all backends."""

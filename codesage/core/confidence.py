@@ -6,7 +6,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from codesage.utils.logging import get_logger
 

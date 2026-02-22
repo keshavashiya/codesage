@@ -180,7 +180,7 @@ def log_operation(logger: logging.Logger, operation: str, level: int = logging.I
 
     try:
         yield
-    except Exception as e:
+    except Exception:
         duration = (time.perf_counter() - start) * 1000
         logger.error(
             f"Failed: {operation}",

@@ -13,8 +13,13 @@ from typing import Any, Dict, List, Optional
 
 from codesage.utils.config import Config
 from codesage.utils.logging import get_logger
+from codesage.memory.style_analyzer import StyleAnalyzer as _StyleAnalyzer
 
 logger = get_logger("mcp.server")
+
+# Single source of truth for Python-only pattern names.
+# Used to filter out irrelevant patterns when the project language is not Python.
+_PYTHON_SPECIFIC_PATTERNS: frozenset = _StyleAnalyzer.PYTHON_ONLY_PATTERN_NAMES
 
 # Optional MCP import
 try:
@@ -599,7 +604,7 @@ class CodeSageMCPServer:
                     narrative=f"Deep analysis of '{query}' with security scanning and impact analysis.",
                     suggested_followup=[
                         f"explain_concept(concept='{query}')",
-                        f"trace_flow(element_name='<top_result_name>')",
+                        "trace_flow(element_name='<top_result_name>')",
                     ],
                     search_time_ms=(time.time() - start) * 1000,
                     sources_used=["deep_analyzer", "security_scanner", "graph_store"],
@@ -654,13 +659,28 @@ class CodeSageMCPServer:
             else "low"
         )
 
+        if results:
+            top = results[0]
+            top_name = top.get("name", "?")
+            top_file = top.get("file", "?")
+            top_sim = top.get("similarity", 0)
+            narrative = (
+                f"Found {len(results)} result{'s' if len(results) != 1 else ''} for '{query}'. "
+                f"Top match: '{top_name}' in {top_file} ({top_sim:.0%} similar)."
+            )
+            expl = top.get("explanation", "")
+            if expl:
+                narrative += f" {expl[:150]}"
+        else:
+            narrative = f"No results found for '{query}'. Try broader terms or run 'codesage index'."
+
         return self._build_envelope(
             results=results,
             confidence_tier=tier,
             confidence_score=round(avg_confidence, 3),
-            narrative=f"Found {len(results)} results for '{query}'.",
+            narrative=narrative,
             suggested_followup=[
-                f"get_file_context(file_path='<top_result_file>')",
+                f"get_file_context(file_path='{results[0].get('file', '<file>')}')",
                 f"explain_concept(concept='{query}')",
             ]
             if results
@@ -794,11 +814,28 @@ class CodeSageMCPServer:
             "security_issues": security_issues,
         }
 
+        # Build narrative that's honest about index state
+        if definitions:
+            defs_summary = f"{len(definitions)} definitions"
+            index_note = ""
+        else:
+            defs_summary = "0 definitions in index"
+            index_note = " File may not be indexed yet — run 'codesage index' to add it."
+
+        sec_note = (
+            f" Found {len(security_issues)} security issue(s)."
+            if security_issues
+            else " No security issues."
+        )
+        narrative = (
+            f"File '{file_path}' — {defs_summary}.{sec_note}{index_note}"
+        )
+
         return self._build_envelope(
             results=file_result,
             confidence_tier="high",
             confidence_score=1.0,
-            narrative=f"File '{file_path}' with {len(definitions)} definitions and {len(security_issues)} security issues.",
+            narrative=narrative,
             suggested_followup=[
                 f"search_code(query='functions in {file_path}')",
                 f"review_code(file_path='{file_path}')",
@@ -807,12 +844,138 @@ class CodeSageMCPServer:
             sources_used=["filesystem", "database", "security_scanner"],
         )
 
+    async def _review_diff_content(
+        self, diff_content: str, start: float
+    ) -> Dict[str, Any]:
+        """Run static analysis on a caller-supplied unified diff string.
+
+        Parses the diff, extracts the *added* lines for each supported file,
+        and runs the appropriate checkers (Python or generic) so MCP clients
+        can review an arbitrary diff (e.g. a PR) rather than the local git
+        working-tree state.  Supported extensions: .py, .rs, .go, .js, .jsx,
+        .mjs, .ts, .tsx, .mts.
+        """
+        from pathlib import Path as _Path
+        from codesage.review.checks.python_checks import PythonBadPracticeChecker
+        from codesage.review.checks.complexity import ComplexityChecker
+        from codesage.review.checks.generic_checks import GenericFileChecker
+        from codesage.review.checks.treesitter_checks import (
+            TreeSitterReviewChecker,
+            TREESITTER_AVAILABLE,
+        )
+        from codesage.security.rules import get_enabled_rules
+        from codesage.utils.language_detector import SUPPORTED_EXTENSIONS
+
+        # Parse diff: collect added lines per file
+        file_additions: Dict[str, list] = {}
+        current_file = None
+        for line in diff_content.splitlines():
+            if line.startswith("+++ b/"):
+                current_file = line[6:].strip()
+                file_additions.setdefault(current_file, [])
+            elif line.startswith("+++ /dev/null"):
+                current_file = None
+            elif current_file and line.startswith("+") and not line.startswith("+++"):
+                file_additions[current_file].append(line[1:])
+
+        py_checker = PythonBadPracticeChecker()
+        cx_checker = ComplexityChecker()
+        # Prefer tree-sitter for non-Python; fall back to generic text checks
+        non_py_checker = (
+            TreeSitterReviewChecker() if TREESITTER_AVAILABLE else GenericFileChecker()
+        )
+
+        # Security findings (SecurityFinding objects — different schema)
+        sec_rules = get_enabled_rules()
+
+        issues = []
+
+        for rel_path, added_lines in file_additions.items():
+            ext = _Path(rel_path).suffix.lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                continue
+            content = "\n".join(added_lines)
+            file_path_obj = _Path(rel_path)
+
+            # --- static / complexity ---
+            if ext == ".py":
+                static_hits = py_checker.check(file_path_obj, content) + cx_checker.check(file_path_obj, content)
+            else:
+                static_hits = non_py_checker.check(file_path_obj, content)
+
+            for f in static_hits:
+                sev = f.severity.upper() if isinstance(f.severity, str) else str(f.severity)
+                issues.append({
+                    "file": str(f.file),
+                    "line": f.line,
+                    "severity": sev,
+                    "category": f.category,
+                    "rule_id": f.rule_id,
+                    "message": f.message,
+                    "suggestion": f.suggestion or "",
+                })
+
+            # --- security scanner (in-memory, no disk I/O) ---
+            for rule in sec_rules:
+                if not rule.enabled:
+                    continue
+                for match in rule.matches(content):
+                    line_number = content[: match.start()].count("\n") + 1
+                    sev_name = rule.severity.name if hasattr(rule.severity, "name") else str(rule.severity)
+                    issues.append({
+                        "file": rel_path,
+                        "line": line_number,
+                        "severity": sev_name,
+                        "category": "security",
+                        "rule_id": rule.id,
+                        "message": rule.message,
+                        "suggestion": rule.fix_suggestion or "",
+                        "match": match.group(0)[:120],
+                        "cwe": rule.cwe_id or "",
+                    })
+
+        critical = sum(1 for i in issues if i["severity"] in ("CRITICAL", "HIGH"))
+        warnings = sum(1 for i in issues if i["severity"] == "WARNING")
+        files_reviewed = len([p for p in file_additions if _Path(p).suffix.lower() in SUPPORTED_EXTENSIONS])
+
+        return self._build_envelope(
+            results={
+                "summary": f"{files_reviewed} file(s) reviewed in diff | {critical} critical/high | {warnings} warnings",
+                "stats": {
+                    "total_issues": len(issues),
+                    "files_reviewed": files_reviewed,
+                    "by_severity": {
+                        "critical_high": critical,
+                        "warnings": warnings,
+                        "suggestions": len(issues) - critical - warnings,
+                    },
+                },
+                "issues": issues,
+            },
+            confidence_tier="high" if files_reviewed > 0 else "low",
+            confidence_score=0.9,
+            narrative=f"Static analysis of diff: {len(issues)} issues found across {files_reviewed} file(s). {critical} critical/high severity.",
+            suggested_followup=["analyze_security()"] if critical > 0 else ["get_stats()"],
+            search_time_ms=(time.time() - start) * 1000,
+            sources_used=["static_analysis", "security_scanner"],
+        )
+
     async def _tool_review_code(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute review_code tool (absorbs code smells)."""
+        """Execute review_code tool.
+
+        If 'diff' is provided as a unified diff string, runs static analysis on
+        the modified files extracted from that diff.  Otherwise falls back to
+        reviewing the current git working-tree changes.
+        """
         start = time.time()
+        diff_content = args.get("diff", "").strip()
         file_path = args.get("file_path")
         staged_only = args.get("staged_only", False)
         use_llm = args.get("use_llm", True)
+
+        # If caller supplied an explicit diff, run our static pipeline on it
+        if diff_content:
+            return await self._review_diff_content(diff_content, start)
 
         try:
             from codesage.review.hybrid_analyzer import HybridReviewAnalyzer
@@ -851,8 +1014,10 @@ class CodeSageMCPServer:
                 "CRITICAL": 0,
                 "HIGH": 0,
                 "MEDIUM": 0,
-                "LOW": 0,
                 "WARNING": 0,
+                "LOW": 0,
+                "SUGGESTION": 0,
+                "INFO": 0,
             }
             issues_by_category = {
                 "security": 0,
@@ -935,14 +1100,32 @@ class CodeSageMCPServer:
                 "high" if issue_count == 0 else "medium" if issue_count < 5 else "low"
             )
 
+            critical_n = issues_by_severity.get("CRITICAL", 0)
+            high_n = issues_by_severity.get("HIGH", 0)
+            medium_n = issues_by_severity.get("MEDIUM", 0)
+            warning_n = issues_by_severity.get("WARNING", 0)
+            suggestion_n = issues_by_severity.get("SUGGESTION", 0) + issues_by_severity.get("INFO", 0) + issues_by_severity.get("LOW", 0)
+            sev_parts = []
+            if critical_n: sev_parts.append(f"{critical_n} critical")
+            if high_n: sev_parts.append(f"{high_n} high")
+            if medium_n: sev_parts.append(f"{medium_n} medium")
+            if warning_n: sev_parts.append(f"{warning_n} warning{'s' if warning_n != 1 else ''}")
+            if suggestion_n: sev_parts.append(f"{suggestion_n} suggestion{'s' if suggestion_n != 1 else ''}")
+            sev_summary = ", ".join(sev_parts) if sev_parts else "no blocking issues"
+            review_narrative = (
+                f"Review complete: {issue_count} issue{'s' if issue_count != 1 else ''} "
+                f"across {files_affected} file{'s' if files_affected != 1 else ''} "
+                f"({sev_summary})."
+            )
+
             return self._build_envelope(
                 results=review_results,
                 confidence_tier=tier,
                 confidence_score=0.8,
-                narrative=f"Review complete: {result.critical_count} critical, {result.warning_count} warnings.",
+                narrative=review_narrative,
                 suggested_followup=[
                     "analyze_security()"
-                    if result.critical_count > 0
+                    if critical_n > 0 or high_n > 0 or medium_n > 0
                     else "get_stats()",
                 ],
                 search_time_ms=(time.time() - start) * 1000,
@@ -958,14 +1141,23 @@ class CodeSageMCPServer:
         """Execute analyze_security tool."""
         start = time.time()
         path = args.get("path", ".")
-        severity = args.get("severity", "low")
 
         try:
             from codesage.security.scanner import SecurityScanner
 
             scanner = SecurityScanner()
             target_path = self.project_path / path
-            report = scanner.scan_directory(target_path)
+
+            # Support both file and directory paths
+            if target_path.is_file():
+                raw_findings = scanner.scan_file(target_path)
+                files_scanned = 1
+                total_count = len(raw_findings)
+            else:
+                report = scanner.scan_directory(target_path)
+                raw_findings = report.findings
+                files_scanned = report.files_scanned
+                total_count = report.total_count
 
             findings_list = [
                 {
@@ -975,37 +1167,29 @@ class CodeSageMCPServer:
                     "file": str(f.file),
                     "line": f.line_number,
                 }
-                for f in report.findings[:20]
+                for f in raw_findings[:20]
             ]
 
             security_results = {
-                "files_scanned": report.files_scanned,
-                "total_findings": report.total_count,
+                "files_scanned": files_scanned,
+                "total_findings": total_count,
                 "findings_by_severity": {
-                    "critical": len(
-                        [f for f in report.findings if f.severity.value == "critical"]
-                    ),
-                    "high": len(
-                        [f for f in report.findings if f.severity.value == "high"]
-                    ),
-                    "medium": len(
-                        [f for f in report.findings if f.severity.value == "medium"]
-                    ),
-                    "low": len(
-                        [f for f in report.findings if f.severity.value == "low"]
-                    ),
+                    "critical": len([f for f in raw_findings if f.severity.value == "critical"]),
+                    "high": len([f for f in raw_findings if f.severity.value == "high"]),
+                    "medium": len([f for f in raw_findings if f.severity.value == "medium"]),
+                    "low": len([f for f in raw_findings if f.severity.value == "low"]),
                 },
                 "findings": findings_list,
             }
 
-            total = report.total_count
+            total = total_count
             tier = "high" if total == 0 else "medium" if total < 10 else "low"
 
             return self._build_envelope(
                 results=security_results,
                 confidence_tier=tier,
                 confidence_score=0.9,
-                narrative=f"Scanned {report.files_scanned} files, found {total} security issues.",
+                narrative=f"Scanned {files_scanned} file{'s' if files_scanned != 1 else ''}, found {total} security issue{'s' if total != 1 else ''}.",
                 suggested_followup=[
                     f"get_file_context(file_path='{findings_list[0]['file']}')"
                     if findings_list
@@ -1127,23 +1311,32 @@ class CodeSageMCPServer:
         except Exception:
             pass
 
-        # Synthesize narrative with LLM
-        narrative = ""
-        try:
-            context_str = "\n".join(context_parts)
-            prompt = (
-                f"You are explaining how a codebase implements a concept.\n\n"
-                f"{context_str}\n\n"
-                f"Provide a clear, concise explanation of how '{concept}' is implemented. "
-                f"Reference specific files and functions. Keep it practical."
+        # Guard: skip LLM synthesis when average similarity is too low (high false-positive risk)
+        avg_sim_check = sum(s.similarity for s in suggestions) / len(suggestions)
+        if avg_sim_check < 0.35:
+            narrative = (
+                f"Found {len(suggestions)} loosely related code elements "
+                f"(avg similarity {avg_sim_check:.0%}) — results may not be directly relevant to '{concept}'. "
+                f"Try `search_code(query='{concept}')` for raw results or ensure the project is indexed."
             )
-            narrative = self.llm_provider.generate(
-                prompt=prompt,
-                system_prompt="You are a senior developer explaining code architecture concisely.",
-            )
-        except Exception as e:
-            narrative = f"Found {len(suggestions)} relevant code elements across {len(by_module)} modules."
-            logger.warning(f"LLM synthesis failed for explain_concept: {e}")
+        else:
+            # Synthesize narrative with LLM
+            narrative = ""
+            try:
+                context_str = "\n".join(context_parts)
+                prompt = (
+                    f"You are explaining how a codebase implements a concept.\n\n"
+                    f"{context_str}\n\n"
+                    f"Provide a clear, concise explanation of how '{concept}' is implemented. "
+                    f"Reference specific files and functions. Keep it practical."
+                )
+                narrative = self.llm_provider.generate(
+                    prompt=prompt,
+                    system_prompt="You are a senior developer explaining code architecture concisely.",
+                )
+            except Exception as e:
+                narrative = f"Found {len(suggestions)} relevant code elements across {len(by_module)} modules."
+                logger.warning(f"LLM synthesis failed for explain_concept: {e}")
 
         results = [
             {
@@ -1241,7 +1434,9 @@ class CodeSageMCPServer:
         # 2. Get patterns from memory
         try:
             patterns = self.memory.find_similar_patterns(task, limit=5)
-            result_data["patterns"] = [
+            # Filter out Python-specific patterns when project language is not Python
+            suggest_lang = getattr(self.config, "language", "python").lower()
+            all_patterns = [
                 {
                     "name": p.get("name", "?"),
                     "description": p.get("description", "")[:150],
@@ -1249,6 +1444,14 @@ class CodeSageMCPServer:
                 }
                 for p in patterns
             ]
+            if suggest_lang != "python":
+                # Filter Python-specific patterns; empty is better than wrong-language patterns
+                result_data["patterns"] = [
+                    p for p in all_patterns
+                    if p["name"] not in _PYTHON_SPECIFIC_PATTERNS
+                ]
+            else:
+                result_data["patterns"] = all_patterns
         except Exception:
             pass
 
@@ -1273,15 +1476,23 @@ class CodeSageMCPServer:
                 r.get("name", r.get("file", "?"))
                 for r in result_data["relevant_code"][:3]
             )
+            suggest_primary_lang = getattr(self.config, "language", "python")
+            lang_context = (
+                f"This is a {suggest_primary_lang} project. "
+                if suggest_primary_lang != "python"
+                else ""
+            )
             prompt = (
-                f"Task: {task}\n"
+                f"{lang_context}Task: {task}\n"
                 f"Relevant code: {code_summary}\n"
                 f"Approach: {result_data.get('approach', 'No structured approach available')}\n\n"
-                f"Write a brief (2-3 sentence) summary of the recommended approach."
+                f"Write a brief (2-3 sentence) summary of the recommended approach. "
+                f"Focus on {suggest_primary_lang} idioms and patterns — do NOT mention Python-specific "
+                f"conventions (type hints, docstrings, dunder methods) unless this is a Python project."
             )
             narrative = self.llm_provider.generate(
                 prompt=prompt,
-                system_prompt="You are a helpful senior developer giving concise implementation guidance.",
+                system_prompt=f"You are a helpful senior {suggest_primary_lang} developer giving concise implementation guidance.",
             )
         except Exception:
             narrative = f"Found {len(result_data['relevant_code'])} relevant code elements and {len(result_data['patterns'])} patterns."
@@ -1372,6 +1583,9 @@ class CodeSageMCPServer:
             "chains": [],
         }
 
+        # Track whether the element was found in the graph at all
+        _node_ids_found = False
+
         # Use graph store for tracing
         try:
             from codesage.storage.manager import StorageManager
@@ -1383,6 +1597,7 @@ class CodeSageMCPServer:
                 name_to_find = target.name or element_name
                 nodes = storage.graph_store.find_nodes_by_name(name_to_find)
                 node_ids = [n["id"] for n in nodes] if nodes else []
+                _node_ids_found = bool(node_ids)
 
                 if not node_ids:
                     logger.info(f"No graph nodes found for name '{name_to_find}'")
@@ -1469,11 +1684,53 @@ class CodeSageMCPServer:
             else "low"
         )
 
+        # Build rich narrative
+        callers_list = trace_result["callers"]
+        callees_list = trace_result["callees"]
+        # Detect if the project likely has no graph relationships for its language
+        primary_lang = getattr(self.config, "language", "python").lower()
+        _graph_coverage_note = ""
+        if _node_ids_found and total_connections == 0 and primary_lang != "python":
+            _graph_coverage_note = (
+                f" (Note: call-graph relationships for {primary_lang} are not yet indexed — "
+                "graph tracing currently covers Python only; run 'codesage index' once "
+                "Rust/Go/JS support is added.)"
+            )
+        elif not _node_ids_found and total_connections == 0:
+            _graph_coverage_note = " (element not found in call graph)"
+
+        narrative_parts = [
+            f"'{trace_result['element']}' in {trace_result.get('file', '?')} "
+            f"({trace_result.get('type', 'element')}).\n"
+        ]
+        if callers_list:
+            caller_names = ", ".join(
+                f"'{c['name']}'" for c in callers_list[:5]
+            )
+            narrative_parts.append(f"Called by: {caller_names}.\n")
+        else:
+            narrative_parts.append(
+                f"No callers found{_graph_coverage_note or ' (may be an entry point)'}.\n"
+            )
+        if callees_list:
+            callee_names = ", ".join(
+                f"'{c['name']}'" for c in callees_list[:5]
+            )
+            narrative_parts.append(f"Calls: {callee_names}.\n")
+        else:
+            narrative_parts.append(
+                f"No callees found{_graph_coverage_note or ' in graph'}.\n"
+            )
+        if trace_result.get("chains"):
+            narrative_parts.append(
+                f"Transitive chain depth: {len(trace_result['chains'])} nodes."
+            )
+
         return self._build_envelope(
             results=trace_result,
             confidence_tier=tier,
             confidence_score=0.7 if total_connections > 0 else 0.3,
-            narrative=f"'{trace_result['element']}' has {len(trace_result['callers'])} callers and {len(trace_result['callees'])} callees.",
+            narrative="".join(narrative_parts),
             suggested_followup=[
                 f"get_file_context(file_path='{target.file}')",
                 f"explain_concept(concept='{element_name}')",
@@ -1634,14 +1891,59 @@ class CodeSageMCPServer:
                 unique_results.append(r)
         results = unique_results[:limit]
 
+        # Remove Python-specific patterns when the project's primary language is not Python
+        recommend_lang = getattr(self.config, "language", "python").lower()
+        if recommend_lang != "python":
+            non_python = [r for r in results if r.get("name", "") not in _PYTHON_SPECIFIC_PATTERNS]
+            results = non_python  # Use filtered list (may be empty — better than showing wrong language patterns)
+
+        # Filter: if context has architecture keywords but results are only
+        # generic style patterns (naming, docstring, type_hints), note the gap.
+        _ARCH_KEYWORDS = {
+            "async", "cache", "cach", "singleton", "factory", "decorator",
+            "pool", "queue", "ttl", "retry", "circuit", "observer", "event",
+            "pipeline", "plugin", "middleware", "strategy", "adapter", "proxy",
+            "builder", "repository", "service", "dependency", "injection",
+        }
+        # Generic code style pattern names that are unlikely to match architecture queries
+        _STYLE_ONLY_NAMES = _PYTHON_SPECIFIC_PATTERNS | {
+            "context_managers", "specific_exceptions", "error_handling",
+        }
+        arch_note = ""
+        context_lower = context.lower()
+        if any(kw in context_lower for kw in _ARCH_KEYWORDS):
+            naming_cats = {"naming_convention", "naming", "style"}
+            # A result is "style-only" if its name is in the style set or its
+            # category is a naming/style category
+            def _is_style_only(r: dict) -> bool:
+                return (
+                    r.get("name", "") in _STYLE_ONLY_NAMES
+                    or r.get("category", "") in naming_cats
+                )
+
+            non_style = [r for r in results if not _is_style_only(r)]
+            if not non_style and results:
+                arch_note = (
+                    "Note: No architecture patterns have been learned yet for this context. "
+                    "Run 'codesage index' more and use the tool more to build pattern memory. "
+                    "Showing general codebase style patterns as a fallback."
+                )
+            elif non_style:
+                results = non_style
+
         narrative = ""
         if results:
             names = ", ".join(r["name"] for r in results[:3])
             narrative = f"Found {len(results)} relevant patterns: {names}."
+            if arch_note:
+                narrative = arch_note + " " + narrative
         else:
             narrative = f"No patterns found for '{context}'. The memory system may need more usage data."
 
         tier = "high" if len(results) >= 3 else "medium" if results else "low"
+        # Downgrade confidence if we're serving a fallback
+        if arch_note:
+            tier = "low"
 
         return self._build_envelope(
             results=results,

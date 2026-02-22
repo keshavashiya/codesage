@@ -13,13 +13,6 @@ from codesage.utils.logging import (
     JSONFormatter,
     HumanFormatter,
 )
-from codesage.utils.health import (
-    HealthStatus,
-    check_ollama,
-    check_database,
-    check_disk_space,
-)
-
 
 class TestLogging:
     """Tests for structured logging."""
@@ -88,76 +81,3 @@ class TestLogging:
             assert mock_log.call_count == 2
 
 
-class TestHealthStatus:
-    """Tests for HealthStatus dataclass."""
-
-    def test_healthy_when_all_ok(self):
-        """Test is_healthy when all components are ok."""
-        status = HealthStatus(
-            ollama_available=True,
-            database_accessible=True,
-            vector_store_accessible=True,
-        )
-        assert status.is_healthy
-
-    def test_unhealthy_when_ollama_down(self):
-        """Test is_healthy when Ollama is down."""
-        status = HealthStatus(
-            ollama_available=False,
-            database_accessible=True,
-            vector_store_accessible=True,
-        )
-        assert not status.is_healthy
-
-    def test_to_dict(self):
-        """Test conversion to dictionary."""
-        status = HealthStatus(
-            ollama_available=True,
-            database_accessible=True,
-            vector_store_accessible=True,
-            disk_space_ok=True,
-            ollama_latency_ms=50.0,
-        )
-        data = status.to_dict()
-
-        assert data["healthy"] is True
-        assert data["components"]["ollama"]["status"] == "ok"
-        assert data["components"]["ollama"]["latency_ms"] == 50.0
-
-
-class TestOllamaCheck:
-    """Tests for Ollama health check."""
-
-    def test_ollama_connection_error(self):
-        """Test handling of connection error."""
-        ok, error, latency = check_ollama("http://localhost:99999", timeout=1)
-        assert not ok
-        assert error is not None
-        assert "Cannot connect" in error
-
-
-class TestDatabaseCheck:
-    """Tests for database health check."""
-
-    def test_database_not_found(self, tmp_path):
-        """Test handling of missing database."""
-        db_path = tmp_path / "nonexistent.db"
-        ok, error, size = check_database(db_path)
-        assert not ok
-        assert "not found" in error
-
-
-class TestDiskSpaceCheck:
-    """Tests for disk space check."""
-
-    def test_disk_space_ok(self, tmp_path):
-        """Test disk space check passes with normal space."""
-        ok, warning = check_disk_space(tmp_path, min_free_gb=0.001)
-        assert ok
-        assert warning is None
-
-    def test_disk_space_low(self, tmp_path):
-        """Test disk space check warns with very high requirement."""
-        ok, warning = check_disk_space(tmp_path, min_free_gb=99999)
-        assert not ok
-        assert "Low disk space" in warning

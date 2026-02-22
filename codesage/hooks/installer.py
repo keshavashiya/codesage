@@ -86,7 +86,12 @@ class HookInstaller:
             backup_path=backup_path,
         )
 
-    def install(self, severity: str = "medium", force: bool = False) -> bool:
+    def install(
+        self,
+        severity: str = "high",
+        mode: str = "fast",
+        force: bool = False,
+    ) -> bool:
         """Install the pre-commit hook."""
         self.hooks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -100,7 +105,7 @@ class HookInstaller:
                 )
             self._backup_existing_hook()
 
-        hook_content = self._generate_hook_content(severity)
+        hook_content = self._generate_hook_content(severity=severity, mode=mode)
         self._write_hook(hook_content)
 
         logger.info(f"Installed pre-commit hook at {self.pre_commit_path}")
@@ -124,7 +129,7 @@ class HookInstaller:
 
         return True
 
-    def update(self, severity: str = "medium") -> bool:
+    def update(self, severity: str = "high", mode: str = "fast") -> bool:
         """Update the pre-commit hook with new settings."""
         status = self.get_status()
 
@@ -133,7 +138,7 @@ class HookInstaller:
             return False
 
         self.pre_commit_path.unlink()
-        return self.install(severity=severity)
+        return self.install(severity=severity, mode=mode)
 
     # Private methods
 
@@ -162,16 +167,64 @@ class HookInstaller:
         logger.info(f"Backing up existing hook to {backup_path}")
         self.pre_commit_path.rename(backup_path)
 
-    def _generate_hook_content(self, severity: str) -> str:
-        """Generate hook content from template."""
-        template_path = TEMPLATES_DIR / "pre-commit.sh"
-        template = template_path.read_text()
+    # Embedded fallback template — used when the package was installed without
+    # the templates/ data files (e.g. older pipx install before package-data fix).
+    _HOOK_TEMPLATE = """\
+#!/bin/sh
+# CodeSage Pre-Commit Hook
+# Installed: {installed_at}
+# Mode: {mode} | Severity threshold: {severity}
+#
+# Blocks commits with issues at or above the severity threshold.
+# To bypass (use sparingly): git commit --no-verify
 
-        severity_flag = f"--severity {severity}" if severity != "low" else ""
+# Check if codesage is available
+if ! command -v codesage >/dev/null 2>&1; then
+    echo "[codesage] Not installed or not in PATH — skipping review."
+    echo "           Install: pipx install pycodesage"
+    exit 0
+fi
+
+echo "[codesage] Reviewing staged changes ({mode} mode, blocking on {severity}+)..."
+
+# Run review on staged changes only
+if codesage review --staged --mode {mode} --severity {severity}; then
+    echo "[codesage] Review passed."
+    exit 0
+else
+    exit_code=$?
+    if [ "$exit_code" = "1" ]; then
+        echo ""
+        echo "[codesage] Commit blocked: fix the issues above."
+        echo "           To bypass: git commit --no-verify"
+        exit 1
+    else
+        # Non-1 exit = unexpected error; warn but don't block
+        echo "[codesage] Review error (exit $exit_code) — allowing commit."
+        exit 0
+    fi
+fi
+"""
+
+    def _generate_hook_content(self, severity: str = "high", mode: str = "fast") -> str:
+        """Generate hook content from template.
+
+        Falls back to the embedded template string if the file is not found
+        (e.g. when installed via pipx without the package-data declaration).
+        """
+        template_path = TEMPLATES_DIR / "pre-commit.sh"
+        if template_path.exists():
+            template = template_path.read_text()
+        else:
+            logger.debug(
+                f"Template file not found at {template_path}, using embedded fallback"
+            )
+            template = self._HOOK_TEMPLATE
 
         return template.format(
             installed_at=datetime.now().isoformat(),
-            severity_flag=severity_flag,
+            severity=severity,
+            mode=mode,
         )
 
     def _write_hook(self, content: str) -> None:

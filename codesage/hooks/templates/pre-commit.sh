@@ -1,34 +1,34 @@
 #!/bin/sh
 # CodeSage Pre-Commit Hook
 # Installed: {installed_at}
+# Mode: {mode} | Severity threshold: {severity}
 #
-# This hook runs security scanning on staged files before commit.
-# To bypass: git commit --no-verify
-
-set -e
+# Blocks commits with issues at or above the severity threshold.
+# To bypass (use sparingly): git commit --no-verify
 
 # Check if codesage is available
-if ! command -v codesage &> /dev/null; then
-    echo "CodeSage is not installed or not in PATH"
-    echo "Install with: pipx install pycodesage"
-    exit 1
+if ! command -v codesage >/dev/null 2>&1; then
+    echo "[codesage] Not installed or not in PATH — skipping review."
+    echo "           Install: pipx install pycodesage"
+    exit 0
 fi
 
-echo "Running CodeSage security scan..."
+echo "[codesage] Reviewing staged changes ({mode} mode, blocking on {severity}+)..."
 
-# Run security scan on staged files
-if codesage security scan --staged --exit-on-findings {severity_flag}; then
-    echo "Security scan passed"
+# Run review on staged changes only
+if codesage review --staged --mode {mode} --severity {severity}; then
+    echo "[codesage] Review passed."
     exit 0
 else
     exit_code=$?
-    if [ $exit_code -eq 1 ]; then
+    if [ "$exit_code" = "1" ]; then
         echo ""
-        echo "Security issues found. Commit blocked."
-        echo "Fix the issues above or use 'git commit --no-verify' to bypass."
+        echo "[codesage] Commit blocked: fix the issues above."
+        echo "           To bypass: git commit --no-verify"
         exit 1
     else
-        echo "Security scan failed with error code: $exit_code"
-        exit $exit_code
+        # Non-1 exit = unexpected error; warn but don't block
+        echo "[codesage] Review error (exit $exit_code) — allowing commit."
+        exit 0
     fi
 fi

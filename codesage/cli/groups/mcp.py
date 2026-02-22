@@ -7,15 +7,12 @@ for AI IDE integration.
 import asyncio
 import json
 from pathlib import Path
-from typing import Optional
-
 import typer
 from rich.panel import Panel
 from rich.syntax import Syntax
 
 from codesage.cli.utils.console import (
     get_console,
-    get_stderr_console,
     print_error,
     print_success,
     set_mcp_stdio_mode,
@@ -28,7 +25,6 @@ app = typer.Typer(help="MCP server for AI IDE integration")
 @app.command("serve")
 @handle_errors
 def serve(
-    path: str = typer.Argument(".", help="Project directory (ignored if --global is used)"),
     transport: str = typer.Option(
         "stdio",
         "--transport",
@@ -38,130 +34,70 @@ def serve(
     host: str = typer.Option(
         "localhost",
         "--host",
-        help="Host for SSE transport (default: localhost)",
+        help="Host for SSE transport",
     ),
     port: int = typer.Option(
         8080,
         "--port",
         "-p",
-        help="Port for SSE transport (default: 8080)",
-    ),
-    global_mode: bool = typer.Option(
-        False,
-        "--global",
-        "-g",
-        help="Run in global mode (serves all indexed projects)",
+        help="Port for SSE transport",
     ),
 ) -> None:
-    """Start the MCP server.
+    """Start the MCP server (serves all indexed projects).
 
-    Two modes:
-
-    1. Project mode (default): Serves a specific project
-
-       codesage mcp serve /path/to/project
-
-    2. Global mode: Serves all indexed projects
-
-       codesage mcp serve --global
+    Runs in global mode — all projects indexed with 'codesage index' are
+    available. The AI IDE passes a project_name argument to target a specific
+    project, or uses 'list_projects' to discover what's indexed.
 
     Transports:
 
-    - stdio: Single client, process-based (default)
+    - stdio: Single client, process-based (default, recommended for IDE use)
 
-    - sse: Multiple clients, HTTP-based
+    - sse: Multiple clients, HTTP-based (useful for shared/remote setups)
 
     Examples:
 
       codesage mcp serve
 
-      codesage mcp serve --global
-
-      codesage mcp serve --global -t sse -p 8080
+      codesage mcp serve -t sse -p 8080
     """
     console = get_console()
-    stderr_console = get_stderr_console()
 
     # Validate transport
     if transport not in ["stdio", "sse"]:
         print_error(f"Invalid transport: {transport}. Must be 'stdio' or 'sse'.")
         raise typer.Exit(1)
 
-    # Enable stdio mode to redirect all console output to stderr
-    # This prevents corrupting the MCP JSON-RPC protocol on stdout
+    # Redirect console output to stderr so stdout stays clean for the MCP protocol
     if transport == "stdio":
         set_mcp_stdio_mode(True)
 
-    if global_mode:
-        # Global mode: serve all projects
-        from codesage.mcp.global_server import GlobalCodeSageMCPServer
+    from codesage.mcp.global_server import GlobalCodeSageMCPServer
 
-        if transport == "sse":
-            console.print(
-                Panel(
-                    f"[bold]Mode:[/bold] Global (all projects)\n"
-                    f"[bold]Transport:[/bold] {transport}\n"
-                    f"[bold]Endpoint:[/bold] http://{host}:{port}/sse",
-                    title="CodeSage Global MCP Server",
-                    border_style="green",
-                )
+    if transport == "sse":
+        console.print(
+            Panel(
+                f"[bold]Transport:[/bold] {transport}\n"
+                f"[bold]Endpoint:[/bold] http://{host}:{port}/sse",
+                title="CodeSage MCP Server",
+                border_style="green",
             )
+        )
 
-        try:
-            global_server = GlobalCodeSageMCPServer()
+    try:
+        global_server = GlobalCodeSageMCPServer()
 
-            if transport == "stdio":
-                asyncio.run(global_server.run_stdio())
-            else:
-                asyncio.run(global_server.run_sse(host=host, port=port))
+        if transport == "stdio":
+            asyncio.run(global_server.run_stdio())
+        else:
+            asyncio.run(global_server.run_sse(host=host, port=port))
 
-        except KeyboardInterrupt:
-            if transport == "sse":
-                console.print("\n[yellow]Server stopped by user[/yellow]")
-        except Exception as e:
-            print_error(f"Server error: {e}")
-            raise typer.Exit(1)
-    else:
-        # Project mode: serve specific project
-        from codesage.mcp.server import CodeSageMCPServer
-        from codesage.utils.config import Config
-
-        project_path = Path(path).resolve()
-
-        try:
-            config = Config.load(project_path)
-        except FileNotFoundError:
-            print_error(f"Project not initialized at {project_path}")
-            stderr_console.print("Run 'codesage init' first")
-            raise typer.Exit(1)
-
+    except KeyboardInterrupt:
         if transport == "sse":
-            console.print(
-                Panel(
-                    f"[bold]Mode:[/bold] Project\n"
-                    f"[bold]Project:[/bold] {config.project_name}\n"
-                    f"[bold]Path:[/bold] {project_path}\n"
-                    f"[bold]Transport:[/bold] {transport}\n"
-                    f"[bold]Endpoint:[/bold] http://{host}:{port}/sse",
-                    title="CodeSage MCP Server",
-                    border_style="cyan",
-                )
-            )
-
-        try:
-            server = CodeSageMCPServer(project_path)
-
-            if transport == "stdio":
-                asyncio.run(server.run_stdio())
-            else:
-                asyncio.run(server.run_sse(host=host, port=port))
-
-        except KeyboardInterrupt:
-            if transport == "sse":
-                console.print("\n[yellow]Server stopped by user[/yellow]")
-        except Exception as e:
-            print_error(f"Server error: {e}")
-            raise typer.Exit(1)
+            console.print("\n[yellow]Server stopped.[/yellow]")
+    except Exception as e:
+        print_error(f"Server error: {e}")
+        raise typer.Exit(1)
 
 
 @app.command("setup")
@@ -213,7 +149,7 @@ def setup(
             "mcpServers": {
                 "codesage": {
                     "command": codesage_cmd,
-                    "args": ["mcp", "serve", "--global"]
+                    "args": ["mcp", "serve"]
                 }
             }
         }
@@ -228,14 +164,19 @@ def setup(
         console.print("  [dim]Context:[/dim]  suggest_approach, trace_flow, find_examples, recommend_pattern")
         console.print()
         console.print("[dim]Verify with: codesage mcp test[/dim]")
+        console.print()
+        console.print(
+            "[dim]Note: MCP serve/test require the mcp extra. "
+            "Install with: pipx inject pycodesage 'pycodesage[mcp]'[/dim]"
+        )
 
     else:
-        console.print(f"[bold]1. Start the server:[/bold]")
-        console.print(f"   [cyan]codesage mcp serve --global -t sse -p {port}[/cyan]\n")
+        console.print("[bold]1. Start the server:[/bold]")
+        console.print(f"   [cyan]codesage mcp serve -t sse -p {port}[/cyan]\n")
 
         endpoint = f"http://localhost:{port}/sse"
 
-        console.print(f"[bold]2. Configure your AI IDE with this endpoint:[/bold]")
+        console.print("[bold]2. Configure your AI IDE with this endpoint:[/bold]")
         console.print(f"   [cyan]{endpoint}[/cyan]\n")
 
         sse_config = {

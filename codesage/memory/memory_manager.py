@@ -168,7 +168,7 @@ class MemoryManager:
         try:
             self.memory_graph.add_pattern_node(pattern)
         except Exception as e:
-            logger.warning(f"Failed to add pattern to KuzuDB: {e}")
+            logger.debug(f"Failed to add pattern to KuzuDB: {e}")
 
         # Link to project if provided
         if project_name:
@@ -180,7 +180,7 @@ class MemoryManager:
                 try:
                     self.memory_graph.link_pattern_to_project(pattern.id, project.id)
                 except Exception as e:
-                    logger.warning(f"Failed to link pattern to project in graph: {e}")
+                    logger.debug(f"Failed to link pattern to project in graph: {e}")
 
         logger.debug(f"Added pattern {pattern.name} to all stores")
 
@@ -232,7 +232,7 @@ class MemoryManager:
             self.memory_graph.add_cooccurrence(pattern2_id, pattern1_id, correlation)
             logger.debug(f"Recorded co-occurrence: {pattern1_id} <-> {pattern2_id}")
         except Exception as e:
-            logger.warning(f"Failed to record co-occurrence: {e}")
+            logger.debug(f"Failed to record co-occurrence: {e}")
 
     def find_similar_patterns(
         self,
@@ -341,7 +341,7 @@ class MemoryManager:
         try:
             self.memory_graph.add_project_node(project)
         except Exception as e:
-            logger.warning(f"Failed to add project to graph: {e}")
+            logger.debug(f"Failed to add project to graph: {e}")
 
         logger.debug(f"Added project {project.name}")
 
@@ -373,7 +373,7 @@ class MemoryManager:
         try:
             return self.memory_graph.find_similar_projects(project_name, min_similarity)
         except Exception as e:
-            logger.warning(f"Failed to find similar projects: {e}")
+            logger.debug(f"Failed to find similar projects: {e}")
             return []
 
     # ==================== Unified Structure Operations ====================
@@ -388,7 +388,7 @@ class MemoryManager:
             self.memory_graph.add_structure_node(structure)
             logger.debug(f"Added structure {structure.name}")
         except Exception as e:
-            logger.warning(f"Failed to add structure: {e}")
+            logger.debug(f"Failed to add structure: {e}")
 
     def get_preferred_structures(
         self,
@@ -409,7 +409,7 @@ class MemoryManager:
                 structure_type, min_confidence
             )
         except Exception as e:
-            logger.warning(f"Failed to get preferred structures: {e}")
+            logger.debug(f"Failed to get preferred structures: {e}")
             return []
 
     # ==================== Preference Operations ====================
@@ -514,7 +514,7 @@ class MemoryManager:
         try:
             return self.memory_graph.export_style_graph()
         except Exception as e:
-            logger.warning(f"Failed to export style graph: {e}")
+            logger.debug(f"Failed to export style graph: {e}")
             return {"patterns": [], "projects": [], "structures": [], "relationships": []}
 
     def get_cross_project_patterns(self, min_projects: int = 2) -> List[Dict[str, Any]]:
@@ -529,7 +529,7 @@ class MemoryManager:
         try:
             return self.memory_graph.get_cross_project_patterns(min_projects)
         except Exception as e:
-            logger.warning(f"Failed to get cross-project patterns: {e}")
+            logger.debug(f"Failed to get cross-project patterns: {e}")
             return []
 
     # ==================== Metrics ====================
@@ -568,17 +568,17 @@ class MemoryManager:
         try:
             self.preference_store.clear()
         except Exception as e:
-            logger.warning(f"Failed to clear preference store: {e}")
+            logger.debug(f"Failed to clear preference store: {e}")
 
         try:
             self.pattern_store.clear()
         except Exception as e:
-            logger.warning(f"Failed to clear pattern store: {e}")
+            logger.debug(f"Failed to clear pattern store: {e}")
 
         try:
             self.memory_graph.clear()
         except Exception as e:
-            logger.warning(f"Failed to clear memory graph: {e}")
+            logger.debug(f"Failed to clear memory graph: {e}")
 
         logger.info("Cleared all data from MemoryManager")
 

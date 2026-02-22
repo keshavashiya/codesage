@@ -4,7 +4,6 @@ Retrieves relevant code from the codebase based on user queries
 and formats it for inclusion in LLM prompts.
 """
 
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from codesage.core.suggester import Suggester

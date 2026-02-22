@@ -7,9 +7,8 @@ Analyzes patterns across multiple projects to find:
 - Style consistency metrics
 """
 
-from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from codesage.utils.logging import get_logger
 

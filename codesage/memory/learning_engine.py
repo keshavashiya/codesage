@@ -5,7 +5,6 @@ then stores them in the memory system.
 """
 
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -56,6 +55,7 @@ class LearningEngine:
         elements: List[Dict[str, Any]],
         project_name: str,
         project_path: Optional[Path] = None,
+        language: Optional[str] = None,
     ) -> List[LearnedPattern]:
         """Learn patterns from a list of code elements.
 
@@ -63,6 +63,7 @@ class LearningEngine:
             elements: List of code element dictionaries.
             project_name: Name of the project.
             project_path: Optional path to the project.
+            language: Primary programming language of the elements (default: auto-detected).
 
         Returns:
             List of learned patterns.
@@ -75,8 +76,11 @@ class LearningEngine:
         # Ensure project is tracked
         self._ensure_project(project_name, project_path, len(elements))
 
-        # Analyze elements for style patterns
-        all_matches = self._style_analyzer.analyze_elements(elements)
+        # Determine language dynamically
+        language = language or (elements[0].get("language", "python") if elements else "python")
+
+        # Analyze elements for style patterns (language-aware)
+        all_matches = self._style_analyzer.analyze_elements(elements, language=language)
 
         # Aggregate patterns
         aggregated = self._style_analyzer.aggregate_patterns(all_matches)
@@ -128,7 +132,12 @@ class LearningEngine:
         existing = self._memory.get_project(project_name)
 
         if existing:
-            # Update existing project
+            # Update existing project path if changed
+            if project_path and existing.path != project_path:
+                existing.path = project_path
+                self._memory.add_project(existing)
+
+            # Update existing project stats
             self._memory.preference_store.update_project_stats(
                 project_name,
                 total_elements=element_count,

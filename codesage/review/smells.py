@@ -6,7 +6,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from codesage.models.code_element import CodeElement
 from codesage.models.smell import CodeSmell
@@ -161,6 +161,17 @@ class PatternDeviationDetector:
             return []
 
         if not re.match(pattern_cfg["pattern"], element.name):
+            # Before flagging, check if the name matches ANY other known pattern
+            # for this element type (e.g. private methods start with _, dunders
+            # with __, etc.). Only flag if no known pattern matches at all.
+            for other_pname, other_cfg in self._style.NAMING_PATTERNS.items():
+                if other_pname == pattern_name:
+                    continue
+                if element.type not in other_cfg.get("applies_to", []):
+                    continue
+                if re.match(other_cfg["pattern"], element.name):
+                    return []  # legitimate variation — not a real violation
+
             return [
                 CodeSmell(
                     type="naming_convention",
@@ -258,20 +269,6 @@ class PatternDeviationDetector:
                     confidence=0.55,
                     message="Password handling lacks evidence of hashing.",
                     suggestion="Use a secure hashing function for passwords.",
-                )
-            )
-
-        if "token" in code and not any(k in code for k in ["verify", "validate", "decode"]):
-            smells.append(
-                CodeSmell(
-                    type="token_validation",
-                    file=str(element.file),
-                    line=element.line_start,
-                    element=element.name,
-                    severity="warning",
-                    confidence=0.5,
-                    message="Token usage without obvious validation or decoding.",
-                    suggestion="Validate or decode tokens before use.",
                 )
             )
 

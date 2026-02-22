@@ -6,26 +6,17 @@ A global personalization layer that learns developer patterns:
 - KuzuDB: Pattern relationships, cross-project links
 
 Usage:
-    from codesage.memory import MemoryManager, DeveloperProfileManager
+    from codesage.memory import MemoryManager
 
     # Basic usage
     memory = MemoryManager()
     memory.add_pattern(pattern, project_name="my_project")
     similar = memory.find_similar_patterns("snake_case naming")
 
-    # Profile management
-    profile = DeveloperProfileManager()
-    print(profile.generate_style_guide())
-
     # Learning from code
     from codesage.memory import LearningEngine
     engine = LearningEngine(memory)
     patterns = engine.learn_from_elements(elements, "my_project")
-
-    # Hooks for indexer integration
-    from codesage.memory import get_memory_hooks
-    hooks = get_memory_hooks()
-    hooks.on_elements_indexed(elements, "my_project")
 """
 
 # Models
@@ -55,19 +46,10 @@ try:
 except ImportError:
     MemoryGraph = None  # type: ignore
 
-# Profile and Learning
-from .profile import DeveloperProfileManager
+# Learning
 from .style_analyzer import StyleAnalyzer, StyleMatch
 from .learning_engine import LearningEngine
 from .pattern_miner import PatternMiner
-
-# Hooks
-from .hooks import (
-    MemoryHooks,
-    get_memory_hooks,
-    set_memory_hooks,
-    enable_memory_learning,
-)
 
 __all__ = [
     # Models
@@ -84,15 +66,9 @@ __all__ = [
     "PatternStore",
     "MemoryGraph",
     "MemoryManager",
-    # Profile and Learning
-    "DeveloperProfileManager",
+    # Learning
     "StyleAnalyzer",
     "StyleMatch",
     "LearningEngine",
     "PatternMiner",
-    # Hooks
-    "MemoryHooks",
-    "get_memory_hooks",
-    "set_memory_hooks",
-    "enable_memory_learning",
 ]

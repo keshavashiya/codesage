@@ -1,6 +1,5 @@
 """Console utilities for CodeSage CLI."""
 
-import sys
 from functools import lru_cache
 
 from rich.console import Console

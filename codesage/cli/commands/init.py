@@ -6,7 +6,7 @@ import typer
 from rich.panel import Panel
 from rich.tree import Tree
 
-from codesage.cli.utils.console import get_console, print_error, print_success
+from codesage.cli.utils.console import get_console, print_success
 from codesage.cli.utils.decorators import handle_errors
 
 

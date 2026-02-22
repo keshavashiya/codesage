@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Set
 
 from codesage.security.models import SecurityFinding, SecurityReport, SecurityRule, Severity
-from codesage.security.rules import ALL_RULES, get_enabled_rules
+from codesage.security.rules import get_enabled_rules
 from codesage.utils.logging import get_logger
 
 logger = get_logger(__name__)
